@@ -1,0 +1,4 @@
+fixture_station;fixture_date;fixture_time;fixture_air_temp;fixture_relative_humidity;fixture_wind_speed;fixture_wind_direction;fixture_precipitation;fixture_solar_radiation
+FIXTURE-123;2025-01-02;12:00;25,1;75;2,3;180;0,0;9999
+FIXTURE-123;2025-01-02;13:00;Null;74;2,5;190;0,2;450
+OTHER-FIXTURE;2025-01-02;12:00;19,0;80;1,2;170;1,0;390

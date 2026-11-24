@@ -1,0 +1,590 @@
+{
+  "info": {
+    "name": "Sistema Triton API",
+    "description": "Fluxo manual de desenvolvimento. As requisições usam cookie de sessão HttpOnly; mantenha o cookie jar ativo. Geometrias e medições são sintéticas.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "propertyId",
+      "value": ""
+    },
+    {
+      "key": "reservoirId",
+      "value": ""
+    },
+    {
+      "key": "outorgaId",
+      "value": ""
+    },
+    {
+      "key": "hydrometerId",
+      "value": ""
+    },
+    {
+      "key": "stationId",
+      "value": ""
+    },
+    {
+      "key": "levelImageReviewId",
+      "value": ""
+    },
+    {
+      "key": "alertId",
+      "value": ""
+    },
+    {
+      "key": "inmetStationCode",
+      "value": ""
+    },
+    {
+      "key": "inmetStationName",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Saúde",
+      "item": [
+        {
+          "name": "GET health",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Autenticação",
+      "item": [
+        {
+          "name": "POST criar conta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Pessoa de Teste\",\n  \"cpf\": \"12345678909\",\n  \"business_address\": \"Endereço sintético\",\n  \"email\": \"teste@triton.local\",\n  \"password\": \"Triton-Teste-2026!\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/register"
+          }
+        },
+        {
+          "name": "POST login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"demo@triton.local\",\n  \"password\": \"Triton-Demo-2026!\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/login"
+          }
+        },
+        {
+          "name": "GET sessão atual",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/auth/me"
+          }
+        },
+        {
+          "name": "POST sair",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/auth/logout"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Propriedade e reservatório",
+      "item": [
+        {
+          "name": "GET propriedades",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/properties?skip=0&limit=50"
+          }
+        },
+        {
+          "name": "POST propriedade",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set('propertyId', pm.response.json().id)"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Fazenda de Teste\",\n  \"cep\": \"38500-000\",\n  \"city\": \"Monte Carmelo\",\n  \"state\": \"MG\"\n}"
+            },
+            "url": "{{baseUrl}}/properties"
+          }
+        },
+        {
+          "name": "POST reservatório",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set('reservoirId', pm.response.json().id)"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Reservatório de teste\",\n  \"base_width_m\": 10,\n  \"base_length_m\": 10,\n  \"top_width_m\": 12,\n  \"top_length_m\": 12,\n  \"height_m\": 4,\n  \"geometry_kml\": \"<kml xmlns='http://www.opengis.net/kml/2.2'><Document><Placemark><Polygon><outerBoundaryIs><LinearRing><coordinates>-47,-18 -46.999,-18 -46.999,-17.999 -47,-17.999 -47,-18</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark></Document></kml>\"\n}"
+            },
+            "url": "{{baseUrl}}/properties/{{propertyId}}/reservoirs"
+          }
+        },
+        {
+          "name": "GET dashboard",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/dashboard/{{propertyId}}"
+          }
+        },
+        {
+          "name": "PATCH posi??o da propriedade (substitua pelas coordenadas confirmadas)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"latitude\": -18.731234,\n  \"longitude\": -47.498765\n}"
+            },
+            "url": "{{baseUrl}}/properties/{{propertyId}}",
+            "description": "Coordenadas num?ricas apenas como exemplo de formato. Substitua por um ponto confirmado para esta propriedade; n?o use centro do munic?pio, outorga ou reservat?rio como substituto."
+          }
+        },
+        {
+          "name": "GET per?metro privado do reservat?rio para camada do mapa",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/reservoirs/{{reservoirId}}/map-geometry",
+            "description": "Retorna o KML do reservat?rio ap?s autoriza??o da propriedade. O pol?gono deve ser exibido como camada de reservat?rio, nunca como limite da propriedade."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Outorga e medições",
+      "item": [
+        {
+          "name": "POST outorga com 12 meses zerados",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set('outorgaId', pm.response.json().id)"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"property_id\": {{propertyId}},\n  \"name\": \"Outorga de teste\",\n  \"permit_number\": \"TESTE-01\",\n  \"issued_on\": \"2026-01-01\",\n  \"valid_from\": \"2026-01-01\",\n  \"valid_until\": \"2027-12-31\",\n  \"water_body\": \"Curso d'água sintético\",\n  \"municipality\": \"Monte Carmelo\",\n  \"coordinates_gms\": \"18°43' S, 47°29' O\",\n  \"state\": \"MG\",\n  \"irrigated_area_ha\": 1,\n  \"demands\": [\n    {\"month\":1,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":2,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":3,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":4,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":5,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":6,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":7,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":8,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":9,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":10,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":11,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0},\n    {\"month\":12,\"max_flow_m3_h\":0,\"daily_hours\":0,\"authorized_days\":0,\"monthly_volume_m3\":0}\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/outorgas"
+          }
+        },
+        {
+          "name": "POST hidrômetro de entrada",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set('hydrometerId', pm.response.json().id)"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reservoir_id\": {{reservoirId}},\n  \"outorga_id\": {{outorgaId}},\n  \"name\": \"Hidrômetro de teste\",\n  \"kind\": \"entrada\",\n  \"rated_power_kw\": 5.5\n}"
+            },
+            "url": "{{baseUrl}}/hydrometers"
+          }
+        },
+        {
+          "name": "POST hidrômetro pendente de outorga para gerar alerta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reservoir_id\": {{reservoirId}},\n  \"name\": \"Captação sem vínculo documental (demonstração)\",\n  \"kind\": \"entrada\"\n}"
+            },
+            "url": "{{baseUrl}}/hydrometers"
+          }
+        },
+        {
+          "name": "POST leitura de hidrômetro",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flow_m3_h\": 2,\n  \"volume_m3\": 4,\n  \"observed_at\": \"2026-11-19T10:00:00-03:00\",\n  \"source\": \"simulada\",\n  \"external_id\": \"postman-reading-001\"\n}"
+            },
+            "url": "{{baseUrl}}/hydrometers/{{hydrometerId}}/readings"
+          }
+        },
+        {
+          "name": "POST estação de nível",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set('stationId', pm.response.json().id)"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reservoir_id\": {{reservoirId}},\n  \"name\": \"Estação de teste\",\n  \"minimum_m\": 0,\n  \"maximum_m\": 4\n}"
+            },
+            "url": "{{baseUrl}}/level-stations"
+          }
+        },
+        {
+          "name": "POST leitura de nível",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"level_m\": 2.5,\n  \"observed_at\": \"2026-11-19T10:00:00-03:00\",\n  \"source\": \"manual\"\n}"
+            },
+            "url": "{{baseUrl}}/level-stations/{{stationId}}/readings"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Energia e balanço",
+      "item": [
+        {
+          "name": "POST tarifa manual de teste",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"property_id\": {{propertyId}},\n  \"distributor\": \"Tarifa de teste\",\n  \"tariff_class\": \"Rural (exemplo)\",\n  \"modality\": \"Convencional\",\n  \"value_brl_kwh\": 0.5,\n  \"valid_from\": \"2026-01-01\",\n  \"source\": \"manual\"\n}"
+            },
+            "url": "{{baseUrl}}/energy/tariffs"
+          }
+        },
+        {
+          "name": "GET estimativa de energia",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/energy/estimate/{{propertyId}}?start=2026-11-01&end=2026-11-30"
+          }
+        },
+        {
+          "name": "GET dados insuficientes para evaporação",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/evaporation/estimate/{{propertyId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ruler image reviews (human review)",
+      "item": [
+        {
+          "name": "POST upload image (attach a real user image in Postman)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set('levelImageReviewId', pm.response.json().id)"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "captured_at",
+                  "value": "2026-11-19T10:00:00-03:00",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/level-stations/{{stationId}}/image-reviews"
+          }
+        },
+        {
+          "name": "GET image reviews for station",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/level-stations/{{stationId}}/image-reviews"
+          }
+        },
+        {
+          "name": "GET private original image",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/level-image-reviews/{{levelImageReviewId}}/image"
+          }
+        },
+        {
+          "name": "POST calibrated suggestion (replace points with this photo coordinates)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reference_1\": {\"x\": 60, \"y\": 50, \"level_m\": 1.000},\n  \"reference_2\": {\"x\": 60, \"y\": 150, \"level_m\": 0.000},\n  \"waterline\": {\"x\": 60, \"y\": 75}\n}"
+            },
+            "url": "{{baseUrl}}/level-image-reviews/{{levelImageReviewId}}/calibrate"
+          }
+        },
+        {
+          "name": "POST manual suggestion (example value; replace after field review)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"level_m\": 0.750\n}"
+            },
+            "url": "{{baseUrl}}/level-image-reviews/{{levelImageReviewId}}/suggestion"
+          }
+        },
+        {
+          "name": "POST confirm reviewed value (example value; replace after human review)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"level_m\": 0.750\n}"
+            },
+            "url": "{{baseUrl}}/level-image-reviews/{{levelImageReviewId}}/confirm"
+          }
+        },
+        {
+          "name": "GET revision history",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/level-image-reviews/{{levelImageReviewId}}/history"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Alertas",
+      "item": [
+        {
+          "name": "POST avaliar alertas da propriedade",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) { const alert = pm.response.json().alerts.find((item) => item.status === 'open'); if (alert) pm.collectionVariables.set('alertId', alert.id) }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/alerts/{{propertyId}}/evaluate"
+          }
+        },
+        {
+          "name": "GET alertas em aberto",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/alerts/{{propertyId}}?status=open&skip=0&limit=50"
+          }
+        },
+        {
+          "name": "POST marcar alerta conferido",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Conferido pelo responsável no fluxo de demonstração.\"\n}"
+            },
+            "url": "{{baseUrl}}/alerts/{{alertId}}/resolve"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Meteorologia INMET",
+      "description": "A configuração da estação é local. Sincronizar consulta o ZIP oficial e requer INMET_CSV_SCHEMA_JSON configurado na API. Não use um código fictício.",
+      "item": [
+        {
+          "name": "PUT associar estação INMET",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"station_code\": \"{{inmetStationCode}}\",\n  \"name\": \"{{inmetStationName}}\"\n}"
+            },
+            "url": "{{baseUrl}}/properties/{{propertyId}}/meteorology/station"
+          }
+        },
+        {
+          "name": "GET observações e estado da última coleta",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/properties/{{propertyId}}/meteorology?skip=0&limit=100"
+          }
+        },
+        {
+          "name": "POST sincronizar arquivo anual oficial",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"year\": 2025\n}"
+            },
+            "url": "{{baseUrl}}/properties/{{propertyId}}/meteorology/sync"
+          }
+        }
+      ]
+    }
+  ]
+}

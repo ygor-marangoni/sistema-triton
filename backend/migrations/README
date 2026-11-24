@@ -1,0 +1,2 @@
+Schema changes are applied explicitly with `alembic upgrade head`.
+Do not run downgrade against a database whose data must be preserved.
