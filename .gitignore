@@ -15,9 +15,12 @@ dist/
 
 backend/uploads/
 backend/private_uploads/
+backend/private_demo_uploads/
 backend/.tmp/
 backend/.codex-temp/
 frontend/.tmp/
+backend/postgres-test.local.psd1
+backend/postgres-test.secret
 
 *.py[cod]
 *.log

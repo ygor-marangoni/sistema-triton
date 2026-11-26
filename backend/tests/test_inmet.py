@@ -23,7 +23,7 @@ FIXTURE_SCHEMA = CsvSchema(
     encoding="utf-8", delimiter=";", header_row=0,
     station_code_column="fixture_station", date_column="fixture_date", time_column="fixture_time",
     date_format="%Y-%m-%d", time_format="%H:%M", decimal_separator=",", thousands_separator="", variables=FIXTURE_COLUMNS,
-    datetime_column=None, datetime_format=None,
+    datetime_column=None, datetime_format=None, source_timezone="UTC",
 )
 
 
@@ -91,7 +91,7 @@ def test_schema_and_single_timestamp_column_are_supported_explicitly():
     mapping = {
         "encoding": "utf-8", "delimiter": ";", "header_row": 0,
         "station_code_column": "fixture_station", "datetime_column": "fixture_timestamp",
-        "datetime_format": "%Y-%m-%dT%H:%M", "decimal_separator": ",",
+        "datetime_format": "%Y-%m-%dT%H:%M", "decimal_separator": ",", "source_timezone": "UTC",
         "variables": {
             "temperature_air": {"column": "fixture_air_temp", "unit": "fixture-unit-temp"},
             "relative_humidity": {"column": "fixture_relative_humidity", "unit": "fixture-unit-rh"},
@@ -105,6 +105,11 @@ def test_schema_and_single_timestamp_column_are_supported_explicitly():
     rows = parse_archive(fixture_archive(content), 2025, "FIXTURE-123", schema, datetime.now(timezone.utc))
     assert len(rows) == 5
     assert rows[0].observed_at == datetime(2025, 3, 4, 8, tzinfo=timezone.utc)
+    with pytest.raises(InmetError, match="source_timezone"):
+        load_csv_schema(json.dumps({key: value for key, value in mapping.items() if key != "source_timezone"}))
+    schema_local = load_csv_schema(json.dumps(mapping | {"source_timezone": "America/Sao_Paulo"}))
+    local_rows = parse_archive(fixture_archive(content), 2025, "FIXTURE-123", schema_local, datetime.now(timezone.utc))
+    assert local_rows[0].observed_at == datetime(2025, 3, 4, 11, tzinfo=timezone.utc)
 
 
 def test_upstream_rate_limit_or_server_failure_is_retried_once_then_reported(monkeypatch):

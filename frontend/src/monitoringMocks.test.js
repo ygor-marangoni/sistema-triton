@@ -6,7 +6,7 @@ import { createServer } from 'vite'
 import { createPropertyRequestGuard } from './services/propertyRequestGuard.js'
 
 // Fixtures sintéticas: não usam a API nem gravam no banco da aplicação.
-let server, GrantTab, LevelTab, EnergyTab, HydrometerTab, WorkspaceSummary, ReservoirBanner, PropertyEditor, ResidualHistoryChart, validMonthlyResiduals
+let server, GrantTab, LevelTab, EnergyTab, HydrometerTab, WorkspaceSummary, ReservoirBanner, PropertyEditor, ResidualHistoryChart, validMonthlyResiduals, BalanceEntry, MonthlyCoverage, StageCurves, PermitDocuments, RecordManagement, EvaporationTab, documentErrorMessage
 before(async () => {
   server = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' })
   ;({ GrantTab, LevelTab, EnergyTab } = await server.ssrLoadModule('/src/App.jsx'))
@@ -15,6 +15,12 @@ before(async () => {
   ;({ default: ReservoirBanner } = await server.ssrLoadModule('/src/components/ReservoirBanner.jsx'))
   ;({ default: PropertyEditor } = await server.ssrLoadModule('/src/components/PropertyEditor.jsx'))
   ;({ default: ResidualHistoryChart, validMonthlyResiduals } = await server.ssrLoadModule('/src/components/ResidualHistoryChart.jsx'))
+  ;({ default: BalanceEntry } = await server.ssrLoadModule('/src/components/BalanceEntry.jsx'))
+  ;({ default: MonthlyCoverage } = await server.ssrLoadModule('/src/components/MonthlyCoverage.jsx'))
+  ;({ default: StageCurves } = await server.ssrLoadModule('/src/components/StageCurves.jsx'))
+  ;({ default: PermitDocuments, documentErrorMessage } = await server.ssrLoadModule('/src/components/PermitDocuments.jsx'))
+  ;({ default: RecordManagement } = await server.ssrLoadModule('/src/components/RecordManagement.jsx'))
+  ;({ default: EvaporationTab } = await server.ssrLoadModule('/src/components/EvaporationTab.jsx'))
 })
 after(async () => { await server?.close() })
 
@@ -36,7 +42,7 @@ test('medições simuladas e manuais conservam origem e ausência de volume', ()
   const meters = render(HydrometerTab, { meters: [meter], outorgas: [], dashboard })
   assert.match(meters, /Medidor de teste/)
   assert.match(meters, /12 m³ · simulada/)
-  assert.match(meters, /Pendente/)
+  assert.doesNotMatch(meters, /12 m³ · simulada · Pendente/)
   const levels = render(LevelTab, { propertyId: 1, reservoirs: [reservoir], stations: [station], dashboard })
   assert.match(levels, /2 m · manual/)
   assert.match(levels, /Indisponível/)
@@ -71,6 +77,8 @@ test('energia incompleta não inventa tarifa ou custo e tolera período parcial'
   assert.match(html, /10 kWh/)
   assert.match(html, /Sem tarifa para o período/)
   assert.match(html, /Nenhuma tarifa cadastrada/)
+  assert.match(html, /Estimativa: potência da bomba/)
+  assert.doesNotMatch(html, /class="monitor-status"/)
 })
 
 test('outorga com dados simulados apresenta o total registrado como parcial', () => {
@@ -113,6 +121,33 @@ test('resumo sem propriedade ou com falha não exibe dados antigos', () => {
   assert.match(render(WorkspaceSummary, { ...props, selectedProperty: { id: 1 }, error: 'Erro' }), /Dados indisponíveis/)
 })
 
+test('resumo mantém contagens disponíveis e indica falha e limite de página', () => {
+  const html = render(WorkspaceSummary, { properties: [], selectedProperty: { id: 1 }, dashboard, meters: null, outorgas: [], alerts: Array(50).fill({}), onNavigate: noop })
+  assert.match(html, /Falha ao carregar/)
+  assert.match(html, /Primeira página; pode haver mais/)
+  assert.match(html, /Reservatórios/)
+})
+
+test('novos fluxos mostram estados e preservam o significado da cobertura sintética', () => {
+  const period = { reservoir_id: 1, reservoir_name: 'Reservatório sintético', period_start: '2025-01-01', period_end: '2025-01-31', period_start_utc: '2025-01-01T03:00:00Z', period_end_utc_exclusive: '2025-02-01T03:00:00Z', period_complete: true, status: 'dados insuficientes', missing: ['rain_mm'], available_records: { level_readings: 1, hydrometer_readings: 0, precipitation_observations: 0 } }
+  assert.match(render(BalanceEntry, { history: [period] }), /Balanço mensal/)
+  assert.match(render(BalanceEntry, { history: [period] }), /Selecione um período/)
+  const coverage = render(MonthlyCoverage, { history: [period] })
+  assert.match(coverage, /Dados insuficientes/)
+  assert.match(coverage, /Precipitação/)
+  assert.match(render(StageCurves, { reservoirs: [reservoir] }), /KML não substitui essa curva/)
+  assert.match(render(PermitDocuments, { propertyId: 1 }), /Documentos de outorga/)
+  assert.match(render(RecordManagement, { kind: 'outorga', records: [] }), /Gerenciar outorgas/)
+  assert.match(documentErrorMessage({ response: { status: 404, data: { detail: 'Not Found' } } }), /Reinicie a API/)
+  assert.match(documentErrorMessage({ message: 'Network Error' }), /não foi possível conectar à API/i)
+  assert.equal(documentErrorMessage({ response: { status: 404, data: { detail: 'Propriedade não encontrada' } } }), 'Propriedade não encontrada')
+  const balance = render(EvaporationTab, { propertyId: 1, balance: { status: 'dados insuficientes', history: [] }, onNavigate: noop })
+  assert.doesNotMatch(balance, /class="monitor-status"/)
+  assert.match(balance, /<select aria-label="Ano do histórico"/)
+  assert.match(balance, /<option value="2000"/)
+  assert.doesNotMatch(balance, /type="number"[^>]*Ano do histórico/)
+})
+
 test('card de reservatório permanece disponível antes e depois do cadastro', () => {
   assert.match(render(ReservoirBanner, { hasReservoirs: false }), /Comece pelo reservatório/)
   const html = render(ReservoirBanner, { hasReservoirs: true })
@@ -124,20 +159,23 @@ test('edição inicia com os valores salvos e sem alterações pendentes', () =>
   const html = render(PropertyEditor, { property: { id: 1, name: 'Fazenda de teste', cep: '00000-000', city: 'Cidade', state: 'MG', latitude: null, longitude: null }, busy: false, onSave: noop })
   assert.match(html, /Fazenda de teste/)
   assert.match(html, /Salvar alteração/)
+  assert.match(html, /Excluir propriedade/)
   assert.doesNotMatch(html, />Cancelar</)
 })
 
 test('gráfico não transforma lacunas, duplicidades ou períodos parciais em dados válidos', () => {
   const status = 'perda residual estimada pelo balanço hídrico'
-  const jan = { reservoir_id: 1, period_start: '2026-01-01', period_end: '2026-01-31', status, coverage: 'completa', origin: 'simulada', loss_residual_mm_day: 2.5 }
-  const feb = { period_start: '2026-02-01', period_end: '2026-02-28', status, coverage: 'completa', loss_residual_mm_day: null }
-  const march = { period_start: '2026-03-01', period_end: '2026-03-15', status, coverage: 'completa', loss_residual_mm_day: 3 }
-  assert.deepEqual(validMonthlyResiduals([jan, feb, march]), [{ month: '2026-01', value: 2.5, origin: 'simulada' }])
+  const jan = { reservoir_id: 1, period_start: '2026-01-01', period_end: '2026-01-31', status, coverage: 'comprovada', origin: 'medida', loss_residual_mm_day: 2.5 }
+  const feb = { period_start: '2026-02-01', period_end: '2026-02-28', status, coverage: 'declarada completa', loss_residual_mm_day: null }
+  const march = { period_start: '2026-03-01', period_end: '2026-03-15', status, coverage: 'comprovada', loss_residual_mm_day: 3 }
+  assert.deepEqual(validMonthlyResiduals([jan, feb, march]), [{ month: '2026-01', value: 2.5, origin: 'medida' }])
   assert.deepEqual(validMonthlyResiduals([jan, jan]), [])
   assert.match(render(ResidualHistoryChart, { history: [] }), /Sem histórico calculado/)
   assert.match(render(ResidualHistoryChart, { history: [jan] }), /2,5/)
-  assert.match(render(ResidualHistoryChart, { history: [jan] }), /simulada/)
+  assert.match(render(ResidualHistoryChart, { history: [jan] }), /medida/)
+  assert.match(render(ResidualHistoryChart, { history: [jan, { ...jan, period_start: '2026-03-01', period_end: '2026-03-31' }] }), /sem dados/)
   assert.deepEqual(validMonthlyResiduals([{ ...jan, loss_residual_mm_day: '' }]), [])
+  assert.deepEqual(validMonthlyResiduals([{ ...jan, coverage: 'declarada completa' }]), [])
   assert.deepEqual(validMonthlyResiduals([jan, { ...jan, reservoir_id: 2, period_start: '2026-02-01', period_end: '2026-02-28' }]), [])
 })
 

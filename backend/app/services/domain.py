@@ -1,5 +1,5 @@
 from calendar import monthrange
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -17,30 +17,141 @@ def reservoir_volume(base_width: Decimal, base_length: Decimal, top_width: Decim
 
 
 def compare_month(outorga, demand, readings, year: int, month: int) -> dict:
-    """Compare each operating day with its own quota; no daily surplus rollover."""
+    """Compare explicitly bounded meter intervals without inventing daily allocation.
+
+    A known interval may contribute to the month total only when the complete
+    interval is inside the month. Daily quota comparisons accept only intervals
+    whose start and end fall on the same operational date. Cross-midnight and
+    legacy readings without a start remain visible as unassigned evidence.
+    """
     if month < 1 or month > 12:
         raise ValueError("Mês inválido")
     daily_quota = Decimal(demand.max_flow_m3_h) * Decimal(demand.daily_hours)
     days_authorized = int(demand.authorized_days)
+    period_start = datetime(year, month, 1, tzinfo=OPERATIONAL_TZ)
+    next_month = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=OPERATIONAL_TZ)
+    period_start_utc = period_start.astimezone(timezone.utc)
+    period_end_utc = next_month.astimezone(timezone.utc)
     by_day: dict[date, Decimal] = {}
-    eligible = 0
-    pending = 0
+    pending = duplicate_readings = unassigned_intervals = out_of_order = delayed = 0
+    monthly_volume = Decimal(0)
+    monthly_count = 0
+    accepted = []
+    review_items = []
+    seen = set()
+    previous_order = None
+    def needs_review(reading, reason, start=None, observed=None):
+        review_items.append({
+            "reading_id": getattr(reading, "id", None),
+            "external_id": getattr(reading, "external_id", None),
+            "interval_start_at": start or getattr(reading, "interval_start_at", None),
+            "observed_at": observed or getattr(reading, "observed_at", None),
+            "reason": reason,
+        })
     for reading in readings:
-        observed = reading.observed_at
-        if observed.tzinfo is None or observed.utcoffset() is None:
+        observed = getattr(reading, "observed_at", None)
+        if observed is None or observed.tzinfo is None or observed.utcoffset() is None:
             pending += 1
+            needs_review(reading, "horário observado ausente ou sem fuso")
             continue
-        local_day = observed.astimezone(OPERATIONAL_TZ).date()
-        if local_day.year != year or local_day.month != month:
+        observed_utc = observed.astimezone(timezone.utc)
+        order_key = (observed_utc, getattr(reading, "id", 0) or 0)
+        if previous_order is not None and order_key < previous_order:
+            out_of_order += 1
+        previous_order = order_key
+        created = getattr(reading, "created_at", None)
+        if created is not None and created.tzinfo is not None and created.astimezone(timezone.utc) > observed_utc:
+            delayed += 1
+
+        start = getattr(reading, "interval_start_at", None)
+        if start is None or start.tzinfo is None or start.utcoffset() is None or start.astimezone(timezone.utc) >= observed_utc:
+            if period_start_utc <= observed_utc < period_end_utc:
+                pending += 1
+                unassigned_intervals += 1
+                needs_review(reading, "início do intervalo ausente ou inválido", observed=observed_utc)
             continue
-        if reading.volume_m3 is None or getattr(reading, "quality", "").startswith(("pendente", "inconsistente", "inconclusiva", "linha de base")):
+        start_utc = start.astimezone(timezone.utc)
+        # Readings from other months are not relevant to this comparison.
+        if observed_utc <= period_start_utc or start_utc >= period_end_utc:
+            continue
+        if start_utc < period_start_utc or observed_utc > period_end_utc:
             pending += 1
+            unassigned_intervals += 1
+            needs_review(reading, "intervalo atravessa o limite do mês", start_utc, observed_utc)
             continue
-        if not (outorga.valid_from <= local_day <= outorga.valid_until):
+
+        external_id = getattr(reading, "external_id", None)
+        identity = ("external", external_id) if external_id else (
+            ("id", getattr(reading, "id")) if getattr(reading, "id", None) is not None
+            else ("interval", start_utc, observed_utc)
+        )
+        if identity in seen:
+            duplicate_readings += 1
             pending += 1
+            needs_review(reading, "identificador de leitura duplicado", start_utc, observed_utc)
             continue
-        by_day[local_day] = by_day.get(local_day, Decimal(0)) + Decimal(reading.volume_m3)
-        eligible += 1
+        seen.add(identity)
+        if (getattr(reading, "unit", "m³") or "").strip().lower() not in {"m3", "m³"}:
+            pending += 1
+            needs_review(reading, "unidade incompatível", start_utc, observed_utc)
+            continue
+        value = getattr(reading, "volume_m3", None)
+        quality = str(getattr(reading, "quality", "")).strip().lower()
+        if value is None or value < 0 or getattr(reading, "source", "") == "simulada" or quality.startswith(("pendente", "inconsistente", "inconclusiva", "linha de base", "não revisada", "simulada")):
+            pending += 1
+            needs_review(reading, "valor ausente, simulado ou pendente de revisão", start_utc, observed_utc)
+            continue
+        if hasattr(reading, "outorga_link_status") and reading.outorga_link_status != "confirmado":
+            pending += 1
+            needs_review(reading, "vínculo histórico de outorga não comprovado", start_utc, observed_utc)
+            continue
+        if hasattr(reading, "resolved_outorga_id") and reading.resolved_outorga_id != getattr(outorga, "id", None):
+            pending += 1
+            needs_review(reading, "leitura associada a outra outorga", start_utc, observed_utc)
+            continue
+        start_day = start.astimezone(OPERATIONAL_TZ).date()
+        last_instant = observed_utc - timedelta(microseconds=1)
+        end_day = last_instant.astimezone(OPERATIONAL_TZ).date()
+        if not (outorga.valid_from <= start_day <= outorga.valid_until and outorga.valid_from <= end_day <= outorga.valid_until):
+            pending += 1
+            needs_review(reading, "intervalo fora da vigência legal da outorga", start_utc, observed_utc)
+            continue
+        accepted.append((start_utc, observed_utc, Decimal(value), reading, start_day, end_day))
+
+    # Chronological sorting makes delayed imports deterministic. Overlapping
+    # intervals are retained as evidence but cannot be summed twice.
+    last_end = None
+    eligible_intervals = []
+    for start_utc, observed_utc, value, reading, start_day, end_day in sorted(accepted, key=lambda row: (row[0], row[1], getattr(row[3], "id", 0) or 0)):
+        if last_end is not None and start_utc < last_end:
+            pending += 1
+            unassigned_intervals += 1
+            needs_review(reading, "intervalo sobreposto a outra leitura", start_utc, observed_utc)
+            continue
+        last_end = observed_utc
+        monthly_volume += value
+        monthly_count += 1
+        if start_day == end_day:
+            by_day[start_day] = by_day.get(start_day, Decimal(0)) + value
+            daily_assignment = start_day.isoformat()
+        else:
+            pending += 1
+            unassigned_intervals += 1
+            daily_assignment = None
+            needs_review(reading, "intervalo cruza dias operacionais; não foi distribuído", start_utc, observed_utc)
+        eligible_intervals.append({
+            "reading_id": getattr(reading, "id", None),
+            "external_id": getattr(reading, "external_id", None),
+            "interval_start_at": start_utc,
+            "observed_at": observed_utc,
+            "volume_m3": value,
+            "unit": getattr(reading, "unit", "m³"),
+            "source": getattr(reading, "source", None),
+            "quality": getattr(reading, "quality", None),
+            "outorga_link_id": getattr(reading, "outorga_link_id", None),
+            "resolved_outorga_id": getattr(reading, "resolved_outorga_id", None),
+            "daily_assignment": daily_assignment,
+        })
     allowed_days_used = 0
     inside = Decimal(0)
     surplus = Decimal(0)
@@ -63,13 +174,19 @@ def compare_month(outorga, demand, readings, year: int, month: int) -> dict:
         daily.append({"date": day.isoformat(), "volume_m3": volume, "inside_limit_m3": day_inside, "non_transferable_surplus_m3": day_surplus, "extrapolated_m3": day_over, "status": status})
     days_in_month = monthrange(year, month)[1]
     return {
-        "year": year, "month": month, "measured_volume_m3": sum(by_day.values(), Decimal(0)),
+        "year": year, "month": month, "measured_volume_m3": monthly_volume if monthly_count else None,
         "inside_limit_m3": inside, "non_transferable_surplus_m3": surplus, "extrapolated_m3": over,
         "operating_days_used": allowed_days_used, "operating_days_authorized": days_authorized,
         "monthly_reference_limit_m3": Decimal(demand.monthly_volume_m3),
         "daily_reference_limit_m3": daily_quota, "missing_days": days_in_month - len(by_day),
-        "pending_readings": pending, "coverage": "incompleto", "daily": daily,
-        "notes": "Leituras registradas não comprovam cobertura contínua; sobras diárias não são transferidas.",
+        "pending_readings": pending, "duplicate_readings": duplicate_readings,
+        "out_of_order_readings": out_of_order, "delayed_readings": delayed,
+        "unassigned_intervals": unassigned_intervals,
+        "eligible_intervals": eligible_intervals,
+        "review_items": review_items,
+        "status": "dados insuficientes" if monthly_count == 0 else "parcial; intervalos não comprovam cobertura mensal",
+        "coverage": "incompleto", "daily": daily,
+        "notes": "Intervalos entre dias não são distribuídos por dia. Leituras ausentes, sem início ou duplicadas não viram zero; sobras diárias não são transferidas.",
     }
 
 
@@ -101,7 +218,13 @@ def water_balance(**data) -> dict:
     missing = [key for key in required if data.get(key) is None]
     if missing:
         return {"status": "dados insuficientes", "loss_residual_m3": None, "loss_residual_mm_day": None, "missing": missing, "interpretation": "Perda residual estimada pelo balanço hídrico não calculada."}
-    area, duration = Decimal(data["area_m2"]), Decimal(data["duration_days"])
+    try:
+        values = {key: Decimal(data[key]) for key in required}
+        if any(not value.is_finite() or value < 0 for value in values.values()):
+            raise ValueError("Valores negativos ou não finitos")
+    except (ValueError, TypeError, ArithmeticError):
+        return {"status": "inconsistente", "loss_residual_m3": None, "loss_residual_mm_day": None, "missing": [], "interpretation": "As entradas devem ser números finitos e não negativos."}
+    area, duration = values["area_m2"], values["duration_days"]
     if area <= 0 or duration <= 0:
         return {"status": "inconsistente", "loss_residual_m3": None, "loss_residual_mm_day": None, "missing": [], "interpretation": "Área e duração devem ser positivas."}
     residual = Decimal(data["inflow_m3"]) + Decimal(data["rain_mm"]) / 1000 * area - Decimal(data["outflow_m3"]) - Decimal(data["other_outflow_m3"]) - (Decimal(data["final_volume_m3"]) - Decimal(data["initial_volume_m3"]))

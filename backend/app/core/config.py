@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     media_storage_directory: str = "private_uploads"
     ruler_image_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     ruler_image_max_pixels: int = Field(default=20_000_000, ge=1024, le=100_000_000)
+    ocr_enabled: bool = False
+    ocr_tesseract_command: str = ""
+    ocr_pdf_renderer_command: str = ""
+    ocr_languages: str = "por+eng"
+    ocr_timeout_seconds: int = Field(default=30, ge=1, le=180)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

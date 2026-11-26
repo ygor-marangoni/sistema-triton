@@ -39,6 +39,8 @@ class Property(Timestamped, Base):
     longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     boundary_kml: Mapped[str | None] = mapped_column(Text)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     owner: Mapped[User] = relationship(back_populates="properties")
     reservoirs: Mapped[list["Reservoir"]] = relationship(back_populates="property", cascade="all, delete-orphan")
     outorgas: Mapped[list["Outorga"]] = relationship(back_populates="property", cascade="all, delete-orphan")
@@ -81,6 +83,7 @@ class Outorga(Timestamped, Base):
     state: Mapped[str] = mapped_column(String(2), nullable=False)
     irrigated_area_ha: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     property: Mapped[Property] = relationship(back_populates="outorgas")
     demands: Mapped[list["MonthlyDemand"]] = relationship(back_populates="outorga", cascade="all, delete-orphan", order_by="MonthlyDemand.month")
     hydrometers: Mapped[list["Hydrometer"]] = relationship(back_populates="outorga")
@@ -125,9 +128,32 @@ class Hydrometer(Timestamped, Base):
     longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
     device_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     reservoir: Mapped[Reservoir] = relationship(back_populates="hydrometers")
     outorga: Mapped[Outorga | None] = relationship(back_populates="hydrometers")
     readings: Mapped[list["HydrometerReading"]] = relationship(back_populates="hydrometer", cascade="all, delete-orphan")
+
+
+class HydrometerOutorgaLink(Base):
+    """Audited, half-open validity interval for a meter/outorga association."""
+    __tablename__ = "hydrometer_outorga_links"
+    __table_args__ = (
+        UniqueConstraint("hydrometer_id", "valid_from_at", name="uq_hydrometer_outorga_link_start"),
+        CheckConstraint("valid_until_at IS NULL OR valid_until_at > valid_from_at", name="ck_hydrometer_outorga_link_period"),
+        Index("ix_hydrometer_outorga_link_period", "hydrometer_id", "valid_from_at", "valid_until_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    property_id: Mapped[int] = mapped_column(ForeignKey("properties.id", ondelete="RESTRICT"), index=True, nullable=False)
+    hydrometer_id: Mapped[int] = mapped_column(ForeignKey("hydrometers.id", ondelete="RESTRICT"), index=True, nullable=False)
+    outorga_id: Mapped[int] = mapped_column(ForeignKey("outorgas.id", ondelete="RESTRICT"), index=True, nullable=False)
+    valid_from_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outorga_valid_from_snapshot: Mapped[date] = mapped_column(Date, nullable=False)
+    outorga_valid_until_snapshot: Mapped[date] = mapped_column(Date, nullable=False)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    closed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class HydrometerReading(Timestamped, Base):
@@ -142,6 +168,7 @@ class HydrometerReading(Timestamped, Base):
     hydrometer_id: Mapped[int] = mapped_column(ForeignKey("hydrometers.id", ondelete="CASCADE"), index=True, nullable=False)
     flow_m3_h: Mapped[Decimal | None] = mapped_column(Numeric(12, 3))
     volume_m3: Mapped[Decimal | None] = mapped_column(Numeric(14, 3), nullable=True)
+    interval_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     source: Mapped[str] = mapped_column(String(20), default="manual", nullable=False)
     unit: Mapped[str] = mapped_column(String(20), default="m³", nullable=False)
@@ -235,6 +262,9 @@ class EnergyTariff(Timestamped, Base):
     valid_until: Mapped[date | None] = mapped_column(Date)
     source: Mapped[str] = mapped_column(String(30), default="manual", nullable=False)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    source_reference: Mapped[str | None] = mapped_column(String(500))
+    source_details: Mapped[dict | None] = mapped_column(JSON)
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
 
 
 class MeteorologicalObservation(Timestamped, Base):
@@ -252,10 +282,15 @@ class MeteorologicalObservation(Timestamped, Base):
     variable: Mapped[str] = mapped_column(String(80), nullable=False)
     value: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    interval_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    reference: Mapped[str | None] = mapped_column(String(255))
     is_valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     quality: Mapped[str] = mapped_column(String(80), default="raw_unvalidated", nullable=False)
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     property: Mapped[Property | None] = relationship()
     station: Mapped["MeteorologicalStation | None"] = relationship(back_populates="observations")
 
@@ -307,6 +342,118 @@ class ManagedDocument(Timestamped, Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     processing_status: Mapped[str] = mapped_column(String(32), default="pendente", nullable=False)
     extracted_fields: Mapped[dict | None] = mapped_column(JSON)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    extracted_text: Mapped[str | None] = mapped_column(Text)
+    reviewed_fields: Mapped[dict | None] = mapped_column(JSON)
+
+
+class RecordRevision(Base):
+    __tablename__ = "record_revisions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    property_id: Mapped[int] = mapped_column(ForeignKey("properties.id", ondelete="RESTRICT"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    record_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    record_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    previous_values: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    new_values: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+
+
+class StageVolumeCurve(Base):
+    __tablename__ = "stage_volume_curves"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reservoir_id: Mapped[int] = mapped_column(ForeignKey("reservoirs.id", ondelete="RESTRICT"), index=True, nullable=False)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    survey_date: Mapped[date] = mapped_column(Date, nullable=False)
+    survey_source: Mapped[str] = mapped_column(String(255), nullable=False)
+    survey_responsible: Mapped[str] = mapped_column(String(160), nullable=False)
+    level_unit: Mapped[str] = mapped_column(String(8), nullable=False)
+    volume_unit: Mapped[str] = mapped_column(String(8), nullable=False)
+    points: Mapped[list] = mapped_column(JSON, nullable=False)
+    valid_from: Mapped[date | None] = mapped_column(Date)
+    valid_until: Mapped[date | None] = mapped_column(Date)
+    is_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    approved_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+
+
+class AlertEvaluation(Base):
+    __tablename__ = "alert_evaluations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    property_id: Mapped[int] = mapped_column(ForeignKey("properties.id", ondelete="RESTRICT"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rules: Mapped[list] = mapped_column(JSON, nullable=False)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class NormalizedTelemetry(Base):
+    __tablename__ = "normalized_telemetry"
+    __table_args__ = (UniqueConstraint("property_id", "component_type", "component_id", "source", "origin_id", name="uq_normalized_telemetry_origin"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    property_id: Mapped[int] = mapped_column(ForeignKey("properties.id", ondelete="RESTRICT"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    component_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    component_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    variable: Mapped[str] = mapped_column(String(32), nullable=False)
+    value: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    unit: Mapped[str] = mapped_column(String(8), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    origin_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    out_of_order: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+
+class MonthlyBalance(Base):
+    __tablename__ = "monthly_balances"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reservoir_id: Mapped[int] = mapped_column(ForeignKey("reservoirs.id", ondelete="RESTRICT"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    month: Mapped[int] = mapped_column(Integer, nullable=False)
+    inputs: Mapped[dict] = mapped_column(JSON, nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
+    calculation_mode: Mapped[str] = mapped_column(String(20), default="declarado", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+
+
+class BalanceFlowEvidence(Base):
+    """Reviewed volume evidence for quantified outflows not represented by meters."""
+    __tablename__ = "balance_flow_evidence"
+    __table_args__ = (
+        CheckConstraint("value_m3 >= 0", name="ck_balance_flow_evidence_value"),
+        CheckConstraint("period_end_at > period_start_at", name="ck_balance_flow_evidence_period"),
+        Index("ix_balance_flow_reservoir_period", "reservoir_id", "period_start_at", "period_end_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reservoir_id: Mapped[int] = mapped_column(ForeignKey("reservoirs.id", ondelete="RESTRICT"), index=True, nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), default="other_outflow", nullable=False)
+    value_m3: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    unit: Mapped[str] = mapped_column(String(8), default="m3", nullable=False)
+    period_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    quality: Mapped[str] = mapped_column(String(40), default="pendente de revisao", nullable=False)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TotalizerEvent(Base):
+    __tablename__ = "totalizer_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hydrometer_id: Mapped[int] = mapped_column(ForeignKey("hydrometers.id", ondelete="RESTRICT"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
 
 
 class Alert(Timestamped, Base):

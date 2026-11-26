@@ -21,8 +21,8 @@ def test_alerts_flag_the_excess_day_without_using_another_days_surplus():
     outorga = SimpleNamespace(id=9, name="Outorga de referência", valid_from=date(2026, 1, 1), valid_until=date(2026, 12, 31))
     demand = SimpleNamespace(max_flow_m3_h=Decimal("10"), daily_hours=Decimal("10"), authorized_days=20, monthly_volume_m3=Decimal("2000"))
     readings = [
-        SimpleNamespace(observed_at=datetime(2026, 3, 1, 12, tzinfo=timezone.utc), volume_m3=Decimal("0")),
-        SimpleNamespace(observed_at=datetime(2026, 3, 2, 12, tzinfo=timezone.utc), volume_m3=Decimal("200")),
+        SimpleNamespace(id=1, interval_start_at=datetime(2026, 3, 1, 3, tzinfo=timezone.utc), observed_at=datetime(2026, 3, 1, 15, tzinfo=timezone.utc), volume_m3=Decimal("0"), unit="m³", quality="validada"),
+        SimpleNamespace(id=2, interval_start_at=datetime(2026, 3, 2, 3, tzinfo=timezone.utc), observed_at=datetime(2026, 3, 2, 15, tzinfo=timezone.utc), volume_m3=Decimal("200"), unit="m³", quality="validada"),
     ]
 
     candidates = daily_extrapolation_candidates(outorga, demand, readings, 2026, 3)
@@ -37,8 +37,8 @@ def test_days_beyond_the_authorized_count_flag_the_entire_later_day():
     outorga = SimpleNamespace(id=10, name="Outorga", valid_from=date(2026, 1, 1), valid_until=date(2026, 12, 31))
     demand = SimpleNamespace(max_flow_m3_h=Decimal("10"), daily_hours=Decimal("10"), authorized_days=1, monthly_volume_m3=Decimal("100"))
     readings = [
-        SimpleNamespace(observed_at=datetime(2026, 3, 1, 12, tzinfo=timezone.utc), volume_m3=Decimal("10")),
-        SimpleNamespace(observed_at=datetime(2026, 3, 2, 12, tzinfo=timezone.utc), volume_m3=Decimal("10")),
+        SimpleNamespace(id=1, interval_start_at=datetime(2026, 3, 1, 3, tzinfo=timezone.utc), observed_at=datetime(2026, 3, 1, 15, tzinfo=timezone.utc), volume_m3=Decimal("10"), unit="m³", quality="validada"),
+        SimpleNamespace(id=2, interval_start_at=datetime(2026, 3, 2, 3, tzinfo=timezone.utc), observed_at=datetime(2026, 3, 2, 15, tzinfo=timezone.utc), volume_m3=Decimal("10"), unit="m³", quality="validada"),
     ]
 
     candidates = daily_extrapolation_candidates(outorga, demand, readings, 2026, 3)

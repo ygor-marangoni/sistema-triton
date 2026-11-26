@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CircleMarker, MapContainer, Polygon, Popup, TileLayer, useMap, useMapEvents } from 'react-leaflet'
-import { ArrowUpRight, ChevronDown, ChevronUp, Crosshair, MapPin, Search, TriangleAlert } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, ChevronUp, Crosshair, MapPin, Pencil, Search, TriangleAlert } from 'lucide-react'
 import { alertService, propertyService } from '../services/triton'
 import { errorMessage } from '../api/client'
 import { filterMapProperties, findMapProperty, parseReservoirKml, propertyCoordinates } from '../map/mapUtils'
@@ -80,7 +80,7 @@ function sourceLabel(source) {
   return ({ manual: 'informado manualmente', simulada: 'simulado', dispositivo: 'dispositivo', imagem_revisada: 'imagem revisada' })[source] || source
 }
 
-export default function PropertyMapPage({ properties, selectedProperty, onOpenProperty, onAddProperty, onPropertyUpdated, dashboard, meters, outorgas, alerts, latestActivity, propertyDataPending, propertyLoadError, onNavigate, isDemo }) {
+export default function PropertyMapPage({ properties, selectedProperty, onOpenProperty, onAddProperty, onPropertyUpdated, onPropertyRestored, onEditProperty, dashboard, meters, outorgas, alerts, latestActivity, propertyDataPending, propertyLoadError, onNavigate, isDemo }) {
   const [query, setQuery] = useState('')
   const [city, setCity] = useState('')
   const [locationFilter, setLocationFilter] = useState('all')
@@ -100,6 +100,11 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
   const [enabledReservoirs, setEnabledReservoirs] = useState([])
   const [reservoirLayers, setReservoirLayers] = useState([])
   const [reservoirError, setReservoirError] = useState('')
+  const [archivedOpen, setArchivedOpen] = useState(false)
+  const [archivedProperties, setArchivedProperties] = useState([])
+  const [archivedLoading, setArchivedLoading] = useState(false)
+  const [archivedError, setArchivedError] = useState('')
+  const [restoringId, setRestoringId] = useState(null)
   const markerRefs = useRef({})
 
   const filtered = useMemo(() => filterMapProperties(properties, { query, city, location: locationFilter }), [properties, query, city, locationFilter])
@@ -162,6 +167,18 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
       .finally(() => { if (current) setReservoirsLoading(false) })
     return () => { current = false }
   }, [activeProperty?.id])
+
+  useEffect(() => {
+    if (!archivedOpen) return
+    let current = true
+    setArchivedLoading(true)
+    setArchivedError('')
+    propertyService.archived()
+      .then(({ data }) => { if (current) setArchivedProperties(data) })
+      .catch((error) => { if (current) setArchivedError(errorMessage(error)) })
+      .finally(() => { if (current) setArchivedLoading(false) })
+    return () => { current = false }
+  }, [archivedOpen])
 
   useEffect(() => {
     if (!activeProperty || !enabledReservoirs.length) {
@@ -251,10 +268,21 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
     setEnabledReservoirs((current) => current.includes(reservoirId) ? current.filter((id) => id !== reservoirId) : [...current, reservoirId])
   }
 
+  async function restoreProperty(property) {
+    setRestoringId(property.id)
+    setArchivedError('')
+    try {
+      const { data } = await propertyService.restore(property.id)
+      setArchivedProperties((current) => current.filter((item) => item.id !== property.id))
+      onPropertyRestored?.(data)
+    } catch (error) { setArchivedError(errorMessage(error)) }
+    finally { setRestoringId(null) }
+  }
+
   const recentReadings = latestPropertyReadings(summary?.dashboard)
 
   return <section className="property-map-page">
-    <div className="map-page-heading"><div><p className="eyebrow">SEU ESPAÇO DE MONITORAMENTO</p><h1>Visão da operação</h1><p>Escolha uma propriedade e acompanhe seus dados em um só lugar.</p></div><div className="map-heading-actions"><span className="map-total">{properties.length} {properties.length === 1 ? 'propriedade' : 'propriedades'}</span>{properties.length > 0 && <button className="button secondary" type="button" onClick={onAddProperty}><MapPin size={15} aria-hidden="true" />Cadastrar propriedade</button>}</div></div>
+    <div className="map-page-heading"><div><p className="eyebrow">SEU ESPAÇO DE MONITORAMENTO</p><h1>Visão da operação</h1><p>Escolha uma propriedade e acompanhe seus dados em um só lugar.</p></div><div className="map-heading-actions"><span className="map-total">{properties.length} {properties.length === 1 ? 'propriedade' : 'propriedades'}</span><button className="button secondary" type="button" aria-expanded={archivedOpen} onClick={() => setArchivedOpen((value) => !value)}>{archivedOpen ? 'Fechar arquivadas' : 'Arquivadas'}</button>{properties.length > 0 && <button className="button secondary" type="button" onClick={onAddProperty}><MapPin size={15} aria-hidden="true" />Cadastrar propriedade</button>}</div></div>
     {isDemo && <div className="demo-map-note">Demonstração: as posições e os perímetros exibidos nesta conta são fictícios.</div>}
     <WorkspaceSummary properties={properties} selectedProperty={selectedProperty} loading={propertyDataPending} error={propertyLoadError} dashboard={dashboard} meters={meters} outorgas={outorgas} alerts={alerts} latestActivity={latestActivity} onNavigate={onNavigate} />
     <div className="map-filters">
@@ -292,13 +320,13 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
       <aside className={`map-side-panel${mobileListOpen ? ' mobile-list-open' : ''}`}>
         <div className="map-list-heading"><div><b>Lista de propriedades</b><small>{filtered.length} resultado(s)</small></div><button className="map-mobile-list-toggle" type="button" aria-expanded={mobileListOpen} onClick={() => setMobileListOpen((open) => !open)}>{mobileListOpen ? 'Ocultar lista' : 'Mostrar lista'}{mobileListOpen ? <ChevronUp size={15} aria-hidden="true" /> : <ChevronDown size={15} aria-hidden="true" />}</button></div>
         <div className="map-property-list">
-          {located.length > 0 && <section className="map-list-group"><h2>Com posição informada</h2>{located.map((property) => <button type="button" key={property.id} aria-pressed={activeId === property.id} className={`map-property-row${activeId === property.id ? ' active' : ''}`} onClick={() => selectMapProperty(property.id)}><MapPin size={16} aria-hidden="true" /><span><b>{property.name}</b><small>{property.city}/{property.state}</small></span><span className="map-row-coordinates">{property.latitude}, {property.longitude}</span></button>)}</section>}
-          {pending.length > 0 && <section className="map-list-group"><h2>Localização pendente</h2>{pending.map((property) => <div key={property.id} className={`map-pending-row${activeId === property.id ? ' active' : ''}`}><button type="button" aria-pressed={activeId === property.id} className="map-pending-select" onClick={() => selectMapProperty(property.id)}><MapPin size={16} aria-hidden="true" /><span><b>{property.name}</b><small>{property.city}/{property.state} · sem coordenadas</small></span></button><button type="button" className="text-button" onClick={() => beginLocationEdit(property)}>Definir posição</button></div>)}</section>}
+          {located.length > 0 && <section className="map-list-group"><h2>Com posição informada</h2>{located.map((property) => <div key={property.id} className={`map-property-entry${activeId === property.id ? ' active' : ''}`}><button type="button" aria-pressed={activeId === property.id} className="map-property-row" onClick={() => selectMapProperty(property.id)}><MapPin size={16} aria-hidden="true" /><span><b>{property.name}</b><small>{property.city}/{property.state}</small></span><span className="map-row-coordinates">{property.latitude}, {property.longitude}</span></button><button type="button" className="map-edit-property map-row-edit" aria-label={`Editar ${property.name}`} title="Editar dados da propriedade" onClick={() => onEditProperty?.(property)}><Pencil size={15} aria-hidden="true" /></button></div>)}</section>}
+          {pending.length > 0 && <section className="map-list-group"><h2>Localização pendente</h2>{pending.map((property) => <div key={property.id} className={`map-pending-row${activeId === property.id ? ' active' : ''}`}><button type="button" aria-pressed={activeId === property.id} className="map-pending-select" onClick={() => selectMapProperty(property.id)}><MapPin size={16} aria-hidden="true" /><span><b>{property.name}</b><small>{property.city}/{property.state} · sem coordenadas</small></span></button><button type="button" className="text-button" onClick={() => beginLocationEdit(property)}>Definir posição</button><button type="button" className="map-edit-property map-row-edit" aria-label={`Editar ${property.name}`} title="Editar dados da propriedade" onClick={() => onEditProperty?.(property)}><Pencil size={15} aria-hidden="true" /></button></div>)}</section>}
           {filtered.length === 0 && <p className="map-no-results">Nenhuma propriedade corresponde aos filtros.</p>}
         </div>
 
         {activeProperty && <section className="map-selected-property">
-          <div className="map-selected-heading"><div><small>PRÉVIA DA PROPRIEDADE</small><h2>{activeProperty.name}</h2><p>{activeProperty.city}/{activeProperty.state}</p></div></div>
+          <div className="map-selected-heading"><div><small>PROPRIEDADE</small><h2>{activeProperty.name}</h2><p>{activeProperty.city}/{activeProperty.state}</p></div></div>
           {!activeCoordinates && <p className="map-pending-note">Localização pendente. Você pode abrir o painel agora e cadastrar a posição quando tiver as coordenadas conferidas.</p>}
           {summaryLoading ? <p className="map-muted">Carregando leituras e alertas…</p> : summaryError ? <p className="map-inline-error">{summaryError}</p> : <>
             <div className="map-summary-state"><span>Alertas abertos</span><b>{summary ? summary.alerts.length : '—'}</b></div>
@@ -317,5 +345,6 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
         </section>}
       </aside>
     </div>}
+    {archivedOpen && <section className="map-archive-panel"><div className="map-archive-heading"><h3>Propriedades arquivadas</h3><button type="button" className="text-button" onClick={() => setArchivedOpen(false)}>Fechar</button></div>{archivedError && <p className="map-inline-error" role="alert">{archivedError}</p>}{archivedLoading ? <p className="map-muted">Carregando…</p> : archivedProperties.length ? archivedProperties.map((property) => <article className="map-archive-row" key={property.id}><span><b>{property.name}</b><small>{property.city}/{property.state}</small></span><button type="button" className="text-button" disabled={restoringId === property.id} onClick={() => restoreProperty(property)}>{restoringId === property.id ? 'Restaurando…' : 'Restaurar'}</button></article>) : !archivedError && <p className="map-muted">Nenhuma propriedade arquivada.</p>}</section>}
   </section>
 }

@@ -1,37 +1,60 @@
 import hashlib
 import hmac
+import logging
 import re
+from uuid import uuid4
 from pathlib import Path
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Annotated
 from zoneinfo import ZoneInfo
 import jwt
+import httpx
 from cryptography.fernet import Fernet
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.encoders import jsonable_encoder
 from pwdlib import PasswordHash
-from sqlalchemy import select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import Alert, CollectionRun, DemandRevision, EnergyTariff, Hydrometer, HydrometerReading, LevelImageReview, LevelImageReviewRevision, LevelReading, LevelStation, MeteorologicalObservation, MeteorologicalStation, MonthlyDemand, Outorga, Property, Reservoir, User
-from app.schemas import AdminPropertyIn, AdminUserIn, AdminUserPatch, AlertEvaluationOut, AlertOut, AlertResolveIn, CollectionRunOut, DemandOut, DemandPatch, HydrometerIn, HydrometerOut, HydrometerReadingIn, HydrometerReadingOut, LevelImageConfirmationOut, LevelImageReviewOut, LevelImageReviewRevisionOut, LevelImageSuggestionIn, LevelReadingIn, LevelReadingOut, LevelStationIn, LevelStationOut, LevelStationUpdate, LoginIn, MeteorologicalObservationOut, MeteorologicalStationIn, MeteorologicalStationOut, MeteorologyOut, MeteorologySyncIn, MeteorologySyncOut, OutorgaIn, OutorgaOut, PropertyIn, PropertyOut, PropertyPatch, RegisterIn, ReservoirIn, ReservoirMapOut, ReservoirOut, RulerCalibrationIn, TariffIn, TariffOut, UserOut
+from app.models import Alert, AlertEvaluation, CollectionRun, DemandRevision, EnergyTariff, Hydrometer, HydrometerOutorgaLink, HydrometerReading, LevelImageReview, LevelImageReviewRevision, LevelReading, LevelStation, ManagedDocument, MeteorologicalObservation, MeteorologicalStation, MonthlyDemand, NormalizedTelemetry, Outorga, Property, RecordRevision, Reservoir, StageVolumeCurve, User
+from app.schemas import CurveIn, DocumentReviewIn, MeterEdit, PermitEdit, RecordStateIn
+from app.services.stage_volume import interpolate_volume
+from app.services.permit_pdf import MAX_PDF_BYTES, inspect_pdf
+from app.schemas import AdminPropertyIn, AdminUserIn, AdminUserPatch, AlertEvaluationOut, AlertOut, AlertResolveIn, AneelTariffImportIn, CollectionRunOut, DemandOut, DemandPatch, HydrometerIn, HydrometerOut, HydrometerReadingIn, HydrometerReadingOut, LevelImageConfirmationOut, LevelImageReviewOut, LevelImageReviewRevisionOut, LevelImageSuggestionIn, LevelReadingIn, LevelReadingOut, LevelStationIn, LevelStationOut, LevelStationUpdate, LoginIn, MeteorologicalObservationOut, MeteorologicalStationIn, MeteorologicalStationOut, MeteorologyOut, MeteorologySyncIn, MeteorologySyncOut, OutorgaIn, OutorgaOut, PropertyIn, PropertyOut, PropertyPatch, RegisterIn, ReservoirIn, ReservoirMapOut, ReservoirOut, RulerCalibrationIn, TariffIn, TariffOut, UserOut
 from app.services.domain import compare_month, energy_estimate, reservoir_volume, water_balance
+from app.services.permit_links import resolve_link
 from app.services.demo import demo_balance, demo_permit_comparison, demo_weather, is_demo_property
 from app.services.alerts import daily_extrapolation_candidates, expired_outorga_candidate, level_quality_review_candidate, missing_outorga_candidate, quality_review_candidate, stale_measurement_candidate
 from app.services.geometry import validate_polygon_kml as validate_kml_polygon
 from app.integrations.inmet import InmetAdapter, InmetError, load_csv_schema
+from app.integrations.aneel_tariffs import AneelTariffError, SOURCE_URL as ANEEL_TARIFF_SOURCE_URL, fetch_cemig_application_rows
 from app.services.ruler_images import RulerImageError, calibrated_level, persist_original, resolve_private_image, sanitize_original_filename, validate_and_analyze_image
 
 settings = get_settings()
 password_hash = PasswordHash.recommended()
 app = FastAPI(title="Sistema Triton API", version="0.1.0", description="Monitoramento de água para propriedades irrigadas. OpenAPI disponível em /docs.")
 app.add_middleware(CORSMiddleware, allow_origins=settings.origins, allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"], allow_headers=["Content-Type"])
+
+
+@app.exception_handler(SQLAlchemyError)
+async def database_error_handler(request, exc: SQLAlchemyError):
+    # PostgreSQL undefined column/table: the running schema is incompatible
+    # with the application. Never include SQL, parameters or credentials here.
+    original = getattr(exc, "orig", None)
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if sqlstate in {"42703", "42P01"}:
+        logging.getLogger(__name__).error("Banco incompatível com a versão da API (SQLSTATE %s).", sqlstate)
+        return JSONResponse(status_code=503, content={"detail": "A estrutura do banco está desatualizada para esta versão do sistema. Contate o administrador."})
+    logging.getLogger(__name__).error("Falha de banco de dados (%s).", type(exc).__name__)
+    return JSONResponse(status_code=500, content={"detail": "Não foi possível acessar os dados. Tente novamente ou contate o administrador."})
 
 
 def private_media_root() -> Path:
@@ -92,7 +115,7 @@ Db = Annotated[Session, Depends(get_db)]
 
 def ensure_property(db: Session, property_id: int, user: User) -> Property:
     prop = db.get(Property, property_id)
-    if not prop or (user.role != "admin" and prop.owner_id != user.id):
+    if not prop or prop.is_archived or (user.role != "admin" and prop.owner_id != user.id):
         raise HTTPException(status_code=404, detail="Propriedade não encontrada")
     return prop
 
@@ -150,8 +173,14 @@ def ensure_outorga(db: Session, outorga_id: int, user: User) -> Outorga:
     return outorga
 
 
+def append_record_revision(db, user, property_id, record_type, record_id, action, previous, new):
+    db.add(RecordRevision(property_id=property_id, user_id=user.id, record_type=record_type,
+                          record_id=record_id, action=action, previous_values=jsonable_encoder(previous),
+                          new_values=jsonable_encoder(new)))
+
+
 def property_view(prop: Property) -> dict:
-    return {"id": prop.id, "owner_id": prop.owner_id, "name": prop.name, "cep": prop.cep, "city": prop.city, "state": prop.state, "latitude": prop.latitude, "longitude": prop.longitude, "has_boundary": bool(prop.boundary_kml), "created_at": prop.created_at}
+    return {"id": prop.id, "owner_id": prop.owner_id, "name": prop.name, "cep": prop.cep, "city": prop.city, "state": prop.state, "latitude": prop.latitude, "longitude": prop.longitude, "has_boundary": bool(prop.boundary_kml), "is_archived": prop.is_archived, "archived_at": prop.archived_at, "created_at": prop.created_at}
 
 
 def validate_polygon_kml(kml: str):
@@ -272,8 +301,10 @@ def synchronize_meteorology(property_id: int, data: MeteorologySyncIn, db: Db, u
                 statement = sqlite_insert(MeteorologicalObservation).values(values).on_conflict_do_nothing(index_elements=["property_id", "station_id", "variable", "observed_at"])
             else:
                 raise InmetError("Banco sem suporte à gravação idempotente habilitado para esta integração.")
-            result = db.execute(statement)
-            inserted_count = max(result.rowcount or 0, 0)
+            # psycopg may report rowcount=-1 for INSERT ... ON CONFLICT;
+            # count returned IDs so the import summary reflects actual inserts.
+            result = db.execute(statement.returning(MeteorologicalObservation.id))
+            inserted_count = len(result.scalars().all())
         last_valid_at = max((item.observed_at for item in observations), default=None)
         run.status = "success"
         run.message = "Arquivo validado; sem valores meteorológicos válidos para esta estação/ano." if not observations else "Arquivo oficial processado; observações brutas preservadas sem validação meteorológica."
@@ -344,10 +375,12 @@ def session_status(request: Request, db: Db):
 
 
 @app.get("/properties", response_model=list[PropertyOut])
-def list_properties(db: Db, user: CurrentUser, skip: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=100)):
-    stmt = select(Property).options(selectinload(Property.reservoirs)).order_by(Property.created_at.desc()).offset(skip).limit(limit)
+def list_properties(db: Db, user: CurrentUser, include_archived: bool = False, skip: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=100)):
+    stmt = select(Property).options(selectinload(Property.reservoirs)).order_by(Property.created_at.desc(), Property.id.desc()).offset(skip).limit(limit)
     if user.role != "admin":
         stmt = stmt.where(Property.owner_id == user.id)
+    if not include_archived:
+        stmt = stmt.where(Property.is_archived.is_(False))
     return [property_view(p) for p in db.scalars(stmt).all()]
 
 
@@ -386,11 +419,32 @@ def edit_property(property_id: int, data: PropertyPatch, db: Db, user: CurrentUs
 
 @app.delete("/properties/{property_id}", status_code=204)
 def delete_property(property_id: int, db: Db, user: CurrentUser):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Somente administrador pode excluir propriedades")
-    prop = ensure_property(db, property_id, user)
-    db.delete(prop); db.commit()
-    return Response(status_code=204)
+    prop = db.get(Property, property_id)
+    if not prop or prop.owner_id != user.id:
+        raise HTTPException(status_code=404, detail="Propriedade não encontrada")
+    if not prop.is_archived:
+        previous = {"is_archived": prop.is_archived, "archived_at": prop.archived_at}
+        prop.is_archived = True
+        prop.archived_at = datetime.now(timezone.utc)
+        append_record_revision(db, user, prop.id, "property", prop.id, "archive", previous,
+                               {"is_archived": prop.is_archived, "archived_at": prop.archived_at})
+        db.commit()
+
+
+@app.post("/properties/{property_id}/restore", response_model=PropertyOut)
+def restore_property(property_id: int, db: Db, user: CurrentUser):
+    prop = db.get(Property, property_id)
+    if not prop or prop.owner_id != user.id:
+        raise HTTPException(status_code=404, detail="Propriedade não encontrada")
+    if prop.is_archived:
+        previous = {"is_archived": prop.is_archived, "archived_at": prop.archived_at}
+        prop.is_archived = False
+        prop.archived_at = None
+        append_record_revision(db, user, prop.id, "property", prop.id, "restore", previous,
+                               {"is_archived": prop.is_archived, "archived_at": prop.archived_at})
+    db.commit()
+    db.refresh(prop)
+    return property_view(prop)
 
 
 @app.get("/admin/users")
@@ -461,9 +515,9 @@ def get_reservoir_map_geometry(reservoir_id: int, db: Db, user: CurrentUser):
 
 
 @app.get("/properties/{property_id}/outorgas", response_model=list[OutorgaOut])
-def list_outorgas(property_id: int, db: Db, user: CurrentUser):
+def list_outorgas(property_id: int, db: Db, user: CurrentUser, skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100)):
     ensure_property(db, property_id, user)
-    return db.scalars(select(Outorga).options(selectinload(Outorga.demands)).where(Outorga.property_id == property_id).order_by(Outorga.valid_until.desc())).all()
+    return db.scalars(select(Outorga).options(selectinload(Outorga.demands)).where(Outorga.property_id == property_id).order_by(Outorga.valid_until.desc(), Outorga.id.desc()).offset(skip).limit(limit)).all()
 
 
 @app.get("/outorgas", response_model=list[OutorgaOut])
@@ -480,7 +534,9 @@ def create_outorga(data: OutorgaIn, db: Db, user: CurrentUser):
     values["state"] = values["state"].upper()
     outorga = Outorga(**values)
     outorga.demands = [MonthlyDemand(**d.model_dump()) for d in data.demands]
-    db.add(outorga); db.commit(); db.refresh(outorga)
+    db.add(outorga); db.flush()
+    append_record_revision(db, user, outorga.property_id, "outorga", outorga.id, "create", {}, data.model_dump())
+    db.commit(); db.refresh(outorga)
     return outorga
 
 
@@ -523,12 +579,12 @@ def demand_history(outorga_id: int, month: int, db: Db, user: CurrentUser):
 
 
 @app.get("/hydrometers", response_model=list[HydrometerOut])
-def list_hydrometers(db: Db, user: CurrentUser, property_id: int | None = None):
+def list_hydrometers(db: Db, user: CurrentUser, property_id: int | None = None, skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100)):
     stmt = select(Hydrometer).join(Reservoir).join(Property).order_by(Hydrometer.id)
     if user.role != "admin": stmt = stmt.where(Property.owner_id == user.id)
     if property_id is not None:
         ensure_property(db, property_id, user); stmt = stmt.where(Property.id == property_id)
-    return db.scalars(stmt).all()
+    return db.scalars(stmt.offset(skip).limit(limit)).all()
 
 
 @app.post("/hydrometers", status_code=201, response_model=HydrometerOut)
@@ -537,9 +593,13 @@ def create_hydrometer(data: HydrometerIn, db: Db, user: CurrentUser):
     if data.outorga_id is not None:
         outorga = ensure_outorga(db, data.outorga_id, user)
         if outorga.property_id != reservoir.property_id: raise HTTPException(status_code=422, detail="Outorga e hidrômetro devem pertencer à mesma propriedade")
+        if not outorga.is_active: raise HTTPException(status_code=422, detail="A outorga está inativa")
+        raise HTTPException(status_code=409, detail="O cadastro atual não registra vigência histórica; crie o hidrômetro e registre o vínculo temporal em /hydrometers/{id}/outorga-links.")
     if data.kind == "saída" and data.outorga_id is not None:
         raise HTTPException(status_code=422, detail="Hidrômetro de saída não recebe comparação de outorga")
-    meter = Hydrometer(**data.model_dump()); db.add(meter); db.commit(); db.refresh(meter)
+    meter = Hydrometer(**data.model_dump()); db.add(meter); db.flush()
+    append_record_revision(db, user, reservoir.property_id, "hydrometer", meter.id, "create", {}, data.model_dump())
+    db.commit(); db.refresh(meter)
     return meter
 
 
@@ -548,17 +608,100 @@ def link_hydrometer_outorga(hydrometer_id: int, outorga_id: int, db: Db, user: C
     meter = db.get(Hydrometer, hydrometer_id)
     if not meter: raise HTTPException(status_code=404, detail="Hidrômetro não encontrado")
     reservoir = ensure_reservoir(db, meter.reservoir_id, user); outorga = ensure_outorga(db, outorga_id, user)
-    if meter.kind != "entrada" or outorga.property_id != reservoir.property_id:
+    if meter.kind != "entrada" or outorga.property_id != reservoir.property_id or not outorga.is_active or not meter.is_active:
         raise HTTPException(status_code=422, detail="Somente hidrômetro de entrada pode ser vinculado à outorga da mesma propriedade")
-    meter.outorga_id = outorga.id; db.commit(); db.refresh(meter); return meter
+    raise HTTPException(status_code=409, detail="A associação sem vigência foi descontinuada. Registre o período em /hydrometers/{id}/outorga-links.")
+
+
+def filter_reading_period(stmt, column, start: datetime | None, end: datetime | None):
+    for value in (start, end):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise HTTPException(status_code=422, detail="Informe os limites do período com fuso horário")
+    if start is not None and end is not None and start >= end:
+        raise HTTPException(status_code=422, detail="O início deve ser anterior ao fim exclusivo")
+    if start is not None:
+        stmt = stmt.where(column >= start.astimezone(timezone.utc))
+    if end is not None:
+        stmt = stmt.where(column < end.astimezone(timezone.utc))
+    return stmt
+
+
+def _aware_utc(value):
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def readings_for_outorga_period(db, property_id, outorga_id, start, end):
+    """Load only intervals for a permit with an explicit temporal assignment.
+
+    Rows whose old current pointer matches are included solely as unresolved
+    evidence so the comparison can report them as pending, never as measured.
+    """
+    result = []
+    meters = db.scalars(select(Hydrometer).join(Reservoir).where(
+        Reservoir.property_id == property_id, Hydrometer.kind == "entrada", Hydrometer.is_active.is_(True)
+    ).order_by(Hydrometer.id)).all()
+    start, end = _aware_utc(start), _aware_utc(end)
+    for meter in meters:
+        links = db.scalars(select(HydrometerOutorgaLink).where(HydrometerOutorgaLink.hydrometer_id == meter.id)
+            .order_by(HydrometerOutorgaLink.valid_from_at)).all()
+        normalized_links = [SimpleNamespace(id=link.id, outorga_id=link.outorga_id,
+            valid_from_at=_aware_utc(link.valid_from_at), valid_until_at=_aware_utc(link.valid_until_at)) for link in links]
+        stmt = select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id,
+            or_(and_(HydrometerReading.interval_start_at.is_not(None), HydrometerReading.interval_start_at < end, HydrometerReading.observed_at > start),
+                and_(HydrometerReading.interval_start_at.is_(None), HydrometerReading.observed_at >= start, HydrometerReading.observed_at < end)))
+        # Registration order lets compare_month expose delayed/out-of-order arrivals.
+        for row in db.scalars(stmt.order_by(HydrometerReading.created_at, HydrometerReading.id)).all():
+            observed = _aware_utc(row.observed_at)
+            interval_start = _aware_utc(row.interval_start_at)
+            link, link_status = resolve_link(normalized_links, interval_start, observed)
+            resolved_id = link.outorga_id if link else None
+            if resolved_id != outorga_id and meter.outorga_id != outorga_id:
+                continue
+            result.append(SimpleNamespace(id=row.id, external_id=row.external_id,
+                observed_at=observed, interval_start_at=interval_start, created_at=_aware_utc(row.created_at),
+                volume_m3=row.volume_m3, unit=row.unit, quality=row.quality, source=row.source,
+                outorga_link_id=link.id if link else None,
+                resolved_outorga_id=resolved_id,
+                outorga_link_status="confirmado" if link else link_status))
+    return result
 
 
 @app.get("/hydrometers/{hydrometer_id}/readings", response_model=list[HydrometerReadingOut])
-def list_hydrometer_readings(hydrometer_id: int, db: Db, user: CurrentUser, skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500)):
+def list_hydrometer_readings(hydrometer_id: int, db: Db, user: CurrentUser, skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), start: datetime | None = None, end: datetime | None = None):
     meter = db.get(Hydrometer, hydrometer_id)
     if not meter: raise HTTPException(status_code=404, detail="Hidrômetro não encontrado")
     ensure_reservoir(db, meter.reservoir_id, user)
-    return db.scalars(select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id).order_by(HydrometerReading.observed_at.desc()).offset(skip).limit(limit)).all()
+    stmt = filter_reading_period(select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id), HydrometerReading.observed_at, start, end)
+    return db.scalars(stmt.order_by(HydrometerReading.observed_at.desc(), HydrometerReading.id.desc()).offset(skip).limit(limit)).all()
+
+
+@app.get("/hydrometers/{hydrometer_id}/totalizer-audit")
+def audit_totalizer(hydrometer_id: int, db: Db, user: CurrentUser):
+    meter = db.get(Hydrometer, hydrometer_id)
+    if not meter:
+        raise HTTPException(status_code=404, detail="Hidrômetro não encontrado")
+    ensure_reservoir(db, meter.reservoir_id, user)
+    readings = db.scalars(select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id, HydrometerReading.raw_totalizer_m3.is_not(None)).order_by(HydrometerReading.observed_at, HydrometerReading.id)).all()
+    issues = []
+    previous = None
+    for reading in readings:
+        reason = None
+        if previous is None and reading.volume_m3 is not None:
+            reason = "Primeiro totalizador possui volume de intervalo sem linha de base registrada"
+        elif previous is not None:
+            delta = reading.raw_totalizer_m3 - previous.raw_totalizer_m3
+            if delta < 0:
+                reason = "Totalizador diminuiu: possível reinício, troca ou retorno; requer revisão"
+            elif reading.volume_m3 is not None and reading.volume_m3 != delta:
+                reason = "Volume registrado difere da diferença entre totalizadores consecutivos"
+        if reason:
+            issues.append({"reading_id": reading.id, "observed_at": reading.observed_at, "reason": reason, "recorded_volume_m3": reading.volume_m3, "raw_totalizer_m3": reading.raw_totalizer_m3})
+        previous = reading
+    return {"hydrometer_id": meter.id, "totalizer_readings_checked": len(readings), "issues": issues, "note": "Auditoria indicativa; os registros não foram alterados e não substitui a revisão da sequência e dos vínculos."}
 
 
 @app.post("/hydrometers/{hydrometer_id}/readings", status_code=201, response_model=HydrometerReadingOut)
@@ -566,46 +709,57 @@ def create_hydrometer_reading(hydrometer_id: int, data: HydrometerReadingIn, db:
     meter = db.get(Hydrometer, hydrometer_id)
     if not meter: raise HTTPException(status_code=404, detail="Hidrômetro não encontrado")
     ensure_reservoir(db, meter.reservoir_id, user)
+    if not meter.is_active:
+        raise HTTPException(status_code=409, detail="Hidrômetro inativo não aceita novas leituras")
     if data.external_id:
         old = db.scalar(select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id, HydrometerReading.external_id == data.external_id))
         if old:
-            old_time = old.observed_at if old.observed_at.tzinfo else old.observed_at.replace(tzinfo=timezone.utc)
-            if old_time.astimezone(timezone.utc) != data.observed_at.astimezone(timezone.utc) or old.raw_totalizer_m3 != data.raw_totalizer_m3 or (data.volume_m3 is not None and old.volume_m3 != data.volume_m3) or old.flow_m3_h != data.flow_m3_h or old.source != data.source:
+            old_time = _aware_utc(old.observed_at)
+            old_start = _aware_utc(old.interval_start_at)
+            new_start = _aware_utc(data.interval_start_at)
+            if old_time != data.observed_at.astimezone(timezone.utc) or old_start != new_start or old.raw_totalizer_m3 != data.raw_totalizer_m3 or (data.volume_m3 is not None and old.volume_m3 != data.volume_m3) or old.flow_m3_h != data.flow_m3_h or old.source != data.source:
                 raise HTTPException(status_code=409, detail="Identificador externo já usado por leitura diferente")
             response.status_code = 200
             return old
     old_at = db.scalar(select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id, HydrometerReading.observed_at == data.observed_at))
     if old_at:
-        if (data.volume_m3 is None or old_at.volume_m3 == data.volume_m3) and old_at.raw_totalizer_m3 == data.raw_totalizer_m3 and old_at.flow_m3_h == data.flow_m3_h and old_at.source == data.source:
+        old_start = _aware_utc(old_at.interval_start_at)
+        new_start = _aware_utc(data.interval_start_at)
+        if old_start == new_start and (data.volume_m3 is None or old_at.volume_m3 == data.volume_m3) and old_at.raw_totalizer_m3 == data.raw_totalizer_m3 and old_at.flow_m3_h == data.flow_m3_h and old_at.source == data.source:
             response.status_code = 200
             return old_at
         raise HTTPException(status_code=409, detail="Já existe uma leitura deste hidrômetro nesse instante observado")
     volume = data.volume_m3
     quality = data.quality
+    interval_start = data.interval_start_at.astimezone(timezone.utc) if data.interval_start_at else None
     if data.raw_totalizer_m3 is not None:
         later = db.scalar(select(HydrometerReading.id).where(HydrometerReading.hydrometer_id == meter.id, HydrometerReading.raw_totalizer_m3.is_not(None), HydrometerReading.observed_at > data.observed_at).limit(1))
         if later:
             raise HTTPException(status_code=409, detail="Leitura histórica de totalizador exige revisão das leituras posteriores")
         previous = db.scalar(select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id, HydrometerReading.raw_totalizer_m3.is_not(None), HydrometerReading.observed_at < data.observed_at).order_by(HydrometerReading.observed_at.desc()).limit(1))
         if previous is None:
-            volume = None; quality = "pendente: linha de base do totalizador; volume do intervalo indisponível"
+            volume = None; interval_start = None; quality = "pendente: linha de base do totalizador; volume do intervalo indisponível"
         else:
             delta = data.raw_totalizer_m3 - previous.raw_totalizer_m3
             if delta < 0:
-                volume = None; quality = "inconsistente: totalizador reiniciado ou equipamento trocado; conferir manualmente"
+                volume = None; interval_start = None; quality = "inconsistente: totalizador reiniciado ou equipamento trocado; conferir manualmente"
             elif previous.quality.startswith(("inconsistente", "pendente: totalizador anterior")):
-                volume = None; quality = "pendente: totalizador anterior exige revisão; intervalo indisponível"
+                volume = None; interval_start = None; quality = "pendente: totalizador anterior exige revisão; intervalo indisponível"
             else:
                 volume = delta
+                interval_start = _aware_utc(previous.observed_at)
+    if data.raw_totalizer_m3 is None and interval_start is None and volume is not None:
+        quality = "pendente: início do intervalo não informado; sem atribuição temporal"
     if meter.kind == "entrada" and not quality.startswith(("inconsistente", "pendente")):
-        if meter.outorga_id is None:
-            quality = "pendente: hidrômetro de entrada sem outorga associada"
-        else:
-            permit = db.get(Outorga, meter.outorga_id)
-            observed_day = data.observed_at.astimezone(ZoneInfo("America/Sao_Paulo")).date()
-            if not permit or not (permit.valid_from <= observed_day <= permit.valid_until):
-                quality = "pendente: leitura fora da vigência da outorga associada"
-    reading = HydrometerReading(hydrometer_id=meter.id, flow_m3_h=data.flow_m3_h, volume_m3=volume, observed_at=data.observed_at,
+        persisted_links = db.scalars(select(HydrometerOutorgaLink).where(HydrometerOutorgaLink.hydrometer_id == meter.id)).all()
+        links = [SimpleNamespace(id=link.id, outorga_id=link.outorga_id,
+                    valid_from_at=_aware_utc(link.valid_from_at),
+                    valid_until_at=_aware_utc(link.valid_until_at)) for link in persisted_links]
+        link, link_status = resolve_link(links, interval_start, data.observed_at.astimezone(timezone.utc))
+        if link is None:
+            quality = f"pendente: vínculo histórico não confirmado ({link_status})"
+    reading = HydrometerReading(hydrometer_id=meter.id, flow_m3_h=data.flow_m3_h, volume_m3=volume,
+                                interval_start_at=interval_start, observed_at=data.observed_at.astimezone(timezone.utc),
                                 source=data.source, external_id=data.external_id, quality=quality, raw_totalizer_m3=data.raw_totalizer_m3)
     db.add(reading)
     try:
@@ -617,12 +771,12 @@ def create_hydrometer_reading(hydrometer_id: int, data: HydrometerReadingIn, db:
 
 
 @app.get("/level-stations", response_model=list[LevelStationOut])
-def list_stations(db: Db, user: CurrentUser, property_id: int | None = None):
+def list_stations(db: Db, user: CurrentUser, property_id: int | None = None, skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100)):
     stmt = select(LevelStation).join(Reservoir).join(Property).order_by(LevelStation.id)
     if user.role != "admin": stmt = stmt.where(Property.owner_id == user.id)
     if property_id is not None:
         ensure_property(db, property_id, user); stmt = stmt.where(Property.id == property_id)
-    return db.scalars(stmt).all()
+    return db.scalars(stmt.offset(skip).limit(limit)).all()
 
 
 @app.post("/level-stations", status_code=201, response_model=LevelStationOut)
@@ -639,7 +793,8 @@ def create_station(data: LevelStationIn, db: Db, user: CurrentUser):
 
 def station_has_history(db: Session, station_id: int) -> bool:
     return bool(db.scalar(select(LevelReading.id).where(LevelReading.station_id == station_id).limit(1)) or
-                db.scalar(select(LevelImageReview.id).where(LevelImageReview.station_id == station_id).limit(1)))
+                db.scalar(select(LevelImageReview.id).where(LevelImageReview.station_id == station_id).limit(1)) or
+                db.scalar(select(NormalizedTelemetry.id).where(NormalizedTelemetry.component_type == "level_station", NormalizedTelemetry.component_id == station_id).limit(1)))
 
 
 def lock_station_for_write(db: Session, station_id: int, user: User) -> LevelStation:
@@ -675,20 +830,23 @@ def delete_station(station_id: int, db: Db, user: CurrentUser):
 
 
 @app.get("/level-stations/{station_id}/readings", response_model=list[LevelReadingOut])
-def list_level_readings(station_id: int, db: Db, user: CurrentUser, skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500)):
+def list_level_readings(station_id: int, db: Db, user: CurrentUser, skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), start: datetime | None = None, end: datetime | None = None):
     station = db.get(LevelStation, station_id)
     if not station: raise HTTPException(status_code=404, detail="Estação não encontrada")
     ensure_reservoir(db, station.reservoir_id, user)
-    return db.scalars(select(LevelReading).where(LevelReading.station_id == station.id).order_by(LevelReading.observed_at.desc()).offset(skip).limit(limit)).all()
+    stmt = filter_reading_period(select(LevelReading).where(LevelReading.station_id == station.id), LevelReading.observed_at, start, end)
+    return db.scalars(stmt.order_by(LevelReading.observed_at.desc(), LevelReading.id.desc()).offset(skip).limit(limit)).all()
 
 
 @app.post("/level-stations/{station_id}/readings", status_code=201, response_model=LevelReadingOut)
 def create_level_reading(station_id: int, data: LevelReadingIn, db: Db, user: CurrentUser):
     station = lock_station_for_write(db, station_id, user)
     reservoir = ensure_reservoir(db, station.reservoir_id, user)
+    values = data.model_dump()
+    values["observed_at"] = data.observed_at.astimezone(timezone.utc)
     if data.level_m < station.minimum_m or data.level_m > min(station.maximum_m, reservoir.height_m):
-        raise HTTPException(status_code=422, detail="Nível fora da faixa do sensor/reservatório")
-    reading = LevelReading(station_id=station.id, **data.model_dump()); db.add(reading); db.commit(); db.refresh(reading); return reading
+        values["quality"] = "inconsistente: nível fora da faixa do sensor/reservatório; requer revisão"
+    reading = LevelReading(station_id=station.id, **values); db.add(reading); db.commit(); db.refresh(reading); return reading
 
 
 def level_image_review_values(review: LevelImageReview) -> dict:
@@ -740,7 +898,7 @@ def upload_level_image(
             size_bytes=len(payload),
             width_px=analysis.width,
             height_px=analysis.height,
-            captured_at=captured_at,
+            captured_at=captured_at.astimezone(timezone.utc),
             status="inconclusive",
             method=analysis.method,
             inconclusive_reason=analysis.reason,
@@ -888,7 +1046,52 @@ def level_image_review_history(review_id: int, db: Db, user: CurrentUser):
 @app.post("/energy/tariffs", status_code=201, response_model=TariffOut)
 def create_tariff(data: TariffIn, db: Db, user: CurrentUser):
     ensure_property(db, data.property_id, user)
-    tariff = EnergyTariff(**data.model_dump()); db.add(tariff); db.commit(); db.refresh(tariff); return tariff
+    tariff = EnergyTariff(**data.model_dump(), created_by_id=user.id); db.add(tariff); db.commit(); db.refresh(tariff); return tariff
+
+
+@app.get("/energy/tariffs/aneel/cemig/catalog/{property_id}")
+def list_aneel_cemig_tariff_catalog(property_id: int, db: Db, user: CurrentUser):
+    ensure_property(db, property_id, user)
+    try:
+        return fetch_cemig_application_rows()
+    except (AneelTariffError, httpx.HTTPError) as exc:
+        detail = str(exc) if isinstance(exc, AneelTariffError) else "Fonte oficial de tarifas indisponível no momento. Tente novamente mais tarde."
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
+@app.post("/energy/tariffs/aneel/cemig/import", status_code=201, response_model=TariffOut)
+def import_aneel_cemig_tariff(data: AneelTariffImportIn, db: Db, user: CurrentUser):
+    ensure_property(db, data.property_id, user)
+    try:
+        catalog = fetch_cemig_application_rows()
+    except (AneelTariffError, httpx.HTTPError) as exc:
+        detail = str(exc) if isinstance(exc, AneelTariffError) else "Fonte oficial de tarifas indisponível no momento. Tente novamente mais tarde."
+        raise HTTPException(status_code=503, detail=detail) from exc
+    source_row = next((row for row in catalog["records"] if row["source_row_id"] == data.source_row_id), None)
+    if source_row is None:
+        raise HTTPException(status_code=409, detail="A tarifa não está mais no catálogo atual. Consulte a fonte novamente.")
+    source_details = {**source_row["source_details"], "source_row_id": data.source_row_id, "price_scope": source_row["price_scope"]}
+    existing = db.scalars(select(EnergyTariff).where(EnergyTariff.property_id == data.property_id, EnergyTariff.source_reference == ANEEL_TARIFF_SOURCE_URL)).all()
+    for tariff in existing:
+        if (tariff.source_details or {}).get("source_row_id") == data.source_row_id:
+            return tariff
+    tariff = EnergyTariff(
+        property_id=data.property_id,
+        distributor=source_row["distributor"][:100],
+        tariff_class=source_row["tariff_class"][:80],
+        modality=source_row["modality"][:80],
+        locality=None,
+        value_brl_kwh=Decimal(source_row["value_brl_kwh"]),
+        valid_from=date.fromisoformat(source_row["valid_from"]),
+        valid_until=date.fromisoformat(source_row["valid_until"]) if source_row["valid_until"] else None,
+        source="aneel_cemig",
+        collected_at=datetime.fromisoformat(source_row["fetched_at"]),
+        source_reference=source_row["source_reference"],
+        source_details=source_details,
+        created_by_id=user.id,
+    )
+    db.add(tariff); db.commit(); db.refresh(tariff)
+    return tariff
 
 
 @app.get("/energy/tariffs/{property_id}", response_model=list[TariffOut])
@@ -919,7 +1122,9 @@ def estimate_evaporation(property_id: int, db: Db, user: CurrentUser):
         reservoir = db.scalar(select(Reservoir).where(Reservoir.property_id == property_id).order_by(Reservoir.id))
         if reservoir:
             return demo_balance(reservoir.id)
-    return water_balance(area_m2=None, duration_days=None, rain_mm=None, inflow_m3=None, outflow_m3=None, other_outflow_m3=None, initial_volume_m3=None, final_volume_m3=None)
+    result = water_balance(area_m2=None, duration_days=None, rain_mm=None, inflow_m3=None, outflow_m3=None, other_outflow_m3=None, initial_volume_m3=None, final_volume_m3=None)
+    result["history"] = _integration_routes.monthly_history(property_id, db, user, datetime.now(ZoneInfo("America/Sao_Paulo")).year)["history"]
+    return result
 
 
 @app.get("/alerts/{property_id}", response_model=list[AlertOut])
@@ -938,9 +1143,16 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
     today = now.date()
     candidates: dict[str, dict] = {}
     threshold = settings.alert_stale_after_hours
+    evidence = {"hydrometers": [], "stations": [], "permits": [], "image_reviews": [], "latest_collection": None}
+    collection = db.scalar(select(CollectionRun).where(CollectionRun.property_id == property_id).order_by(CollectionRun.id.desc()).limit(1))
+    if collection and collection.status == "failed":
+        fingerprint = f"collection-failed:{collection.source}:{collection.station_id}"
+        candidates[fingerprint] = {"fingerprint": fingerprint, "origin": collection.source, "rule": "Falha na coleta", "severity": "warning",
+            "details": {"collection_run_id": collection.id, "source": collection.source, "started_at": collection.started_at.isoformat(), "message": collection.message}}
 
-    for meter in db.scalars(select(Hydrometer).join(Reservoir).where(Reservoir.property_id == property_id).order_by(Hydrometer.id)).all():
+    for meter in db.scalars(select(Hydrometer).join(Reservoir).where(Reservoir.property_id == property_id, Hydrometer.is_active.is_(True)).order_by(Hydrometer.id)).all():
         latest = db.scalar(select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id, ~HydrometerReading.quality.like("inconsistente%")).order_by(HydrometerReading.observed_at.desc()).limit(1))
+        evidence["hydrometers"].append({"id": meter.id, "latest_reading_id": latest.id if latest else None, "source": latest.source if latest else None, "observed_at": latest.observed_at.isoformat() if latest else None, "outorga_id": meter.outorga_id})
         stale = stale_measurement_candidate("hidrômetro", meter.id, meter.name, latest.observed_at if latest else None, meter.created_at, now, threshold)
         if stale:
             candidates[stale["fingerprint"]] = stale
@@ -955,6 +1167,7 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
 
     for station in db.scalars(select(LevelStation).join(Reservoir).where(Reservoir.property_id == property_id).order_by(LevelStation.id)).all():
         latest_level = db.scalar(select(LevelReading).where(LevelReading.station_id == station.id, ~LevelReading.quality.like("inconsistente%"), ~LevelReading.quality.like("inconclusiva%")).order_by(LevelReading.observed_at.desc()).limit(1))
+        evidence["stations"].append({"id": station.id, "latest_reading_id": latest_level.id if latest_level else None, "source": latest_level.source if latest_level else None, "observed_at": latest_level.observed_at.isoformat() if latest_level else None})
         stale = stale_measurement_candidate("nível", station.id, station.name, latest_level.observed_at if latest_level else None, station.created_at, now, threshold)
         if stale:
             candidates[stale["fingerprint"]] = stale
@@ -965,24 +1178,28 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
                 candidates[review["fingerprint"]] = review
 
     for image_review in db.scalars(select(LevelImageReview).where(LevelImageReview.property_id == property_id, LevelImageReview.status.in_(("inconclusive", "pending_review")))).all():
+        evidence["image_reviews"].append(image_review.id)
         fingerprint = f"image-review:{image_review.id}"
         candidates[fingerprint] = {
             "fingerprint": fingerprint, "origin": "imagem de régua", "rule": "Imagem pendente de revisão", "severity": "warning",
             "details": {"review_id": image_review.id, "station_id": image_review.station_id, "captured_at": image_review.captured_at.isoformat(), "status": image_review.status, "message": "Confira a imagem e confirme uma leitura válida."},
         }
 
-    permits = db.scalars(select(Outorga).options(selectinload(Outorga.demands)).where(Outorga.property_id == property_id).order_by(Outorga.id)).all()
+    permits = db.scalars(select(Outorga).options(selectinload(Outorga.demands)).where(Outorga.property_id == property_id, Outorga.is_active.is_(True)).order_by(Outorga.id)).all()
     for permit in permits:
+        evidence["permits"].append({"id": permit.id, "valid_until": permit.valid_until.isoformat()})
         expired = expired_outorga_candidate(permit, today)
         if expired:
             candidates[expired["fingerprint"]] = expired
         demand = next((d for d in permit.demands if d.month == today.month), None)
         if not demand:
             continue
-        meter_ids = db.scalars(select(Hydrometer.id).where(Hydrometer.outorga_id == permit.id, Hydrometer.kind == "entrada")).all()
+        meter_ids = db.scalars(select(Hydrometer.id).join(Reservoir).where(Reservoir.property_id == property_id,
+            Hydrometer.kind == "entrada", Hydrometer.is_active.is_(True))).all()
         start = datetime.combine(today.replace(day=1), time.min, ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)
         end = datetime.combine(today + timedelta(days=1), time.min, ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)
-        readings = db.scalars(select(HydrometerReading).where(HydrometerReading.hydrometer_id.in_(meter_ids) if meter_ids else False, HydrometerReading.observed_at >= start, HydrometerReading.observed_at < end).order_by(HydrometerReading.observed_at)).all()
+        readings = readings_for_outorga_period(db, property_id, permit.id, start, end)
+        evidence["permits"][-1].update({"demand_id": demand.id, "meter_ids": meter_ids, "reading_ids": [r.id for r in readings], "period_start": start.isoformat(), "period_end": end.isoformat()})
         for candidate in daily_extrapolation_candidates(permit, demand, readings, today.year, today.month):
             candidates[candidate["fingerprint"]] = candidate
 
@@ -1009,7 +1226,7 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
             alert.severity = candidate["severity"]
 
     active_fingerprints = set(candidates)
-    reconcilable_prefixes = ("stale:", "missing-outorga:", "expired-outorga:", "reading-review:", "image-review:")
+    reconcilable_prefixes = ("stale:", "missing-outorga:", "expired-outorga:", "reading-review:", "image-review:", "collection-failed:")
     open_alerts = db.scalars(select(Alert).where(Alert.property_id == property_id, Alert.status == "open")).all()
     for alert in open_alerts:
         if not alert.fingerprint.startswith(reconcilable_prefixes) or alert.fingerprint in active_fingerprints:
@@ -1022,6 +1239,12 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
         alert.resolved_by_id = user.id
         automatically_resolved += 1
 
+    if collection:
+        evidence["latest_collection"] = {"id": collection.id, "source": collection.source, "status": collection.status, "started_at": collection.started_at.isoformat()}
+    evidence["candidate_details"] = candidates
+    evidence["stale_after_hours"] = threshold
+    db.add(AlertEvaluation(property_id=property_id, user_id=user.id, evaluated_at=now,
+        rules=["medição atrasada", "outorga ausente ou vencida", "leitura ou imagem pendente", "excesso diário cadastrado", "falha da última coleta"], evidence=jsonable_encoder(evidence)))
     db.commit()
     active_count = len(db.scalars(select(Alert.id).where(Alert.property_id == property_id, Alert.status == "open")).all())
     result_alerts = db.scalars(select(Alert).where(Alert.property_id == property_id).order_by(Alert.occurred_at.desc()).limit(100)).all()
@@ -1059,10 +1282,11 @@ def dashboard(property_id: int, db: Db, user: CurrentUser):
     for permit in permits:
         demand = next((d for d in permit.demands if d.month == today.month), None)
         if demand:
-            meter_ids = db.scalars(select(Hydrometer.id).where(Hydrometer.outorga_id == permit.id, Hydrometer.kind == "entrada")).all()
-            readings = db.scalars(select(HydrometerReading).where(HydrometerReading.hydrometer_id.in_(meter_ids) if meter_ids else False, HydrometerReading.observed_at >= datetime.combine(today.replace(day=1), time.min, ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc), HydrometerReading.observed_at < datetime.combine(today + timedelta(days=1), time.min, ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)).order_by(HydrometerReading.observed_at)).all()
+            month_start = datetime.combine(today.replace(day=1), time.min, ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)
+            month_end = datetime.combine(today + timedelta(days=1), time.min, ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)
+            readings = readings_for_outorga_period(db, property_id, permit.id, month_start, month_end)
             summary = demo_permit_comparison(permit, demand, today) if is_demo_property(settings, user, prop) and permit.is_demo else compare_month(permit, demand, readings, today.year, today.month)
-            permit_summaries.append({"outorga_id": permit.id, "name": permit.name, "validity_status": "vigente" if permit.valid_from <= today <= permit.valid_until else "fora da vigência", **summary})
+            permit_summaries.append({"outorga_id": permit.id, "name": permit.name, "validity_status": "inativa" if not permit.is_active else ("vigente" if permit.valid_from <= today <= permit.valid_until else "fora da vigência"), **summary})
     for reservoir in reservoirs:
         for meter in reservoir.hydrometers:
             recent = db.scalars(select(HydrometerReading).where(HydrometerReading.hydrometer_id == meter.id).order_by(HydrometerReading.observed_at.desc()).limit(5)).all()
@@ -1070,7 +1294,7 @@ def dashboard(property_id: int, db: Db, user: CurrentUser):
         if reservoir.level_station:
             reading = db.scalar(select(LevelReading).where(LevelReading.station_id == reservoir.level_station.id).order_by(LevelReading.observed_at.desc()).limit(1))
             volume = None
-            if reading:
+            if reading and not reading.quality.startswith(("inconsistente", "pendente", "inconclusiva")):
                 try: volume = reservoir_volume(reservoir.base_width_m, reservoir.base_length_m, reservoir.top_width_m, reservoir.top_length_m, reservoir.height_m, reading.level_m)
                 except ValueError: volume = None
             latest_levels.append({"reservoir_id": reservoir.id, "reservoir_name": reservoir.name, "station": reservoir.level_station, "latest": reading, "volume_m3": volume, "volume_status": "calculado pela geometria retangular inclinada" if volume is not None else "indisponível"})
@@ -1087,7 +1311,11 @@ def dashboard(property_id: int, db: Db, user: CurrentUser):
             "latest": None if item["latest"] is None else {"id": item["latest"].id, "station_id": item["latest"].station_id, "level_m": item["latest"].level_m, "observed_at": item["latest"].observed_at, "created_at": item["latest"].created_at, "source": item["latest"].source, "quality": item["latest"].quality},
             "volume_m3": item["volume_m3"], "volume_status": item["volume_status"],
         } for item in latest_levels],
-        "recent_hydrometers": [{"hydrometer": {"id": item["hydrometer"].id, "reservoir_id": item["hydrometer"].reservoir_id, "outorga_id": item["hydrometer"].outorga_id, "name": item["hydrometer"].name, "kind": item["hydrometer"].kind, "rated_power_kw": item["hydrometer"].rated_power_kw, "rated_power_cv": item["hydrometer"].rated_power_cv, "is_demo": item["hydrometer"].is_demo}, "readings": [{"id": r.id, "volume_m3": r.volume_m3, "flow_m3_h": r.flow_m3_h, "observed_at": r.observed_at, "created_at": r.created_at, "source": r.source, "quality": r.quality} for r in item["readings"]]} for item in recent_meters],
+        "recent_hydrometers": [{"hydrometer": {"id": item["hydrometer"].id, "reservoir_id": item["hydrometer"].reservoir_id, "outorga_id": item["hydrometer"].outorga_id, "name": item["hydrometer"].name, "kind": item["hydrometer"].kind, "rated_power_kw": item["hydrometer"].rated_power_kw, "rated_power_cv": item["hydrometer"].rated_power_cv, "is_demo": item["hydrometer"].is_demo}, "readings": [{"id": r.id, "volume_m3": r.volume_m3, "flow_m3_h": r.flow_m3_h, "interval_start_at": r.interval_start_at, "observed_at": r.observed_at, "created_at": r.created_at, "source": r.source, "unit": r.unit, "quality": r.quality} for r in item["readings"]]} for item in recent_meters],
         "evaporation": {"status": "dados insuficientes", "message": "Informe área superficial, precipitação, níveis e fluxos do mesmo intervalo para calcular o balanço."},
         "coverage": "incompleto até haver cobertura diária registrada", "updated_at": datetime.now(timezone.utc),
     }
+
+
+# Routes need the authorization helpers defined above; registration is deliberately last.
+from app import integration_routes as _integration_routes  # noqa: E402,F401

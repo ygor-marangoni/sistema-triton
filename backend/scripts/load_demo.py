@@ -3,6 +3,8 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import get_settings  # noqa: E402,F401
@@ -15,12 +17,24 @@ DEMO_PASSWORD = "Triton-Demo-2026!"
 KML = """<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><Polygon><outerBoundaryIs><LinearRing><coordinates>-47.5010,-18.7210 -47.5000,-18.7210 -47.5000,-18.7200 -47.5010,-18.7200 -47.5010,-18.7210</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark></Document></kml>"""
 
 
-def main():
-    from app.core.config import get_settings
-    if get_settings().app_env.lower() not in {"development", "local", "test"}:
+def ensure_demo_database(db, settings):
+    if settings.app_env.lower() not in {"development", "local", "test"}:
         raise SystemExit("A carga de demonstração só é permitida em ambiente local/de desenvolvimento.")
+    url = make_url(settings.database_url)
+    if (url.get_backend_name() != "postgresql" or url.host not in {"localhost", "127.0.0.1", "::1"}
+            or url.database not in {"triton_demo", "triton_integration_test"}):
+        raise SystemExit("Carga recusada: use exclusivamente um banco local triton_demo ou triton_integration_test.")
+    if db.execute(text("SELECT current_database()")).scalar_one() != url.database:
+        raise SystemExit("Carga recusada: o servidor retornou um banco diferente do configurado.")
+    if db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() != "0010_period_constraints":
+        raise SystemExit("Carga recusada: o banco de demonstração precisa estar na revisão 0010.")
+
+
+def main():
+    settings = get_settings()
     db = SessionLocal()
     try:
+        ensure_demo_database(db, settings)
         if db.query(User).filter_by(email=DEMO_EMAIL).first():
             print(f"Conta de demonstração já existe ({DEMO_EMAIL}); nada foi alterado.")
             return

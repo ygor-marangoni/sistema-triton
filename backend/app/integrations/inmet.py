@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 OFFICIAL_ARCHIVE_URL = "https://portal.inmet.gov.br/uploads/dadoshistoricos/{year}.zip"
@@ -51,6 +52,7 @@ class CsvSchema:
     decimal_separator: str
     thousands_separator: str
     variables: dict[str, VariableColumn]
+    source_timezone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,13 @@ def load_csv_schema(raw: str) -> CsvSchema:
     combined_datetime = all(isinstance(data.get(name), str) and data[name].strip() for name in ("datetime_column", "datetime_format"))
     if split_datetime == combined_datetime:
         raise InmetError("Configure data/hora em uma coluna com formato único ou em duas colunas com formatos explícitos.")
+    source_timezone = data.get("source_timezone")
+    if not isinstance(source_timezone, str) or not source_timezone.strip():
+        raise InmetError("Informe source_timezone confirmado para os horários sem offset do arquivo.")
+    try:
+        ZoneInfo(source_timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise InmetError("source_timezone deve ser um fuso IANA válido.") from exc
     if (any(name in data for name in ("date_column", "time_column", "date_format", "time_format")) and not split_datetime) or (any(name in data for name in ("datetime_column", "datetime_format")) and not combined_datetime):
         raise InmetError("Mapeamento de data/hora parcial; informe todas as colunas e formatos do modo escolhido.")
     try:
@@ -211,6 +220,7 @@ def load_csv_schema(raw: str) -> CsvSchema:
         datetime_column=data["datetime_column"].strip() if combined_datetime else None,
         datetime_format=data["datetime_format"] if combined_datetime else None,
         decimal_separator=data["decimal_separator"], thousands_separator=data.get("thousands_separator", ""), variables=variables,
+        source_timezone=source_timezone,
     )
 
 
@@ -289,7 +299,16 @@ def parse_archive(archive: bytes, year: int, station_code: str, schema: CsvSchem
                             raise InmetError("Data/hora inválida em registro da estação; nenhum dado foi importado.") from exc
                         if observed_naive.year != year:
                             continue
-                        observed_at = observed_naive.replace(tzinfo=timezone.utc) if observed_naive.tzinfo is None else observed_naive.astimezone(timezone.utc)
+                        if observed_naive.tzinfo is None:
+                            if not schema.source_timezone:
+                                raise InmetError("Fuso de origem não configurado; nenhum dado foi importado.")
+                            zone = ZoneInfo(schema.source_timezone)
+                            first = observed_naive.replace(tzinfo=zone, fold=0)
+                            second = observed_naive.replace(tzinfo=zone, fold=1)
+                            if first.utcoffset() != second.utcoffset():
+                                raise InmetError("Horário de origem ambíguo ou inexistente; nenhum dado foi importado.")
+                            observed_naive = first
+                        observed_at = observed_naive.astimezone(timezone.utc)
                         for variable, mapping in schema.variables.items():
                             raw_value = row[indexes[mapping.column]]
                             value = _parse_decimal(raw_value, schema)
