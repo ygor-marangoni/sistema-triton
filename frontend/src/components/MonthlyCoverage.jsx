@@ -24,14 +24,14 @@ export default function MonthlyCoverage({ history }) {
     <div className="integration-month-list"><div className="integration-month-heading" aria-hidden="true"><span>Período</span><span>Registros encontrados</span><span>Situação</span><span /></div>
       {items.map((item) => {
         const [year, month] = item.period_start.split('-').map(Number)
-        const proven = item.coverage === 'comprovada' && item.loss_residual_mm_day != null
-        const declared = item.declared_assessment?.result?.loss_residual_mm_day != null
+        const proven = item.coverage === 'comprovada' && item.loss_residual_mm_day != null && item.loss_residual_m3 != null
+        const declared = item.declared_assessment?.result?.loss_residual_mm_day != null && item.declared_assessment?.result?.loss_residual_m3 != null
         const status = proven ? 'Cobertura comprovada' : declared ? 'Cobertura declarada' : item.period_complete ? 'Dados insuficientes' : 'Em andamento'
         return <details className="integration-month" key={`${item.reservoir_id}-${item.period_start}`}>
           <summary><span className="integration-month-date"><strong>{monthNames[month - 1]} de {year}</strong><small>{item.reservoir_name || `Reservatório ${item.reservoir_id}`}</small></span><span className="integration-month-counts">{item.available_records.level_readings} nível · {item.available_records.hydrometer_readings} hidrômetro · {item.available_records.precipitation_observations} chuva</span><span className="integration-month-state"><i className={`integration-month-dot${proven ? ' is-declared' : ''}`} />{status}</span><ChevronDown size={16} /></summary>
           <div className="integration-month-content">
-            {proven && <div className="integration-month-result"><strong>{Number(item.loss_residual_mm_day).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}</strong><span>mm/dia · perda residual estimada · cobertura comprovada</span></div>}
-            {declared && <div className="integration-month-result is-declared"><strong>{Number(item.declared_assessment.result.loss_residual_mm_day).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}</strong><span>mm/dia · avaliação manual · cobertura declarada</span></div>}
+            {proven && <div className="integration-month-result"><strong>{Number(item.loss_residual_m3).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}</strong><span>m³ · perda residual estimada · cobertura comprovada</span></div>}
+            {declared && <div className="integration-month-result is-declared"><strong>{Number(item.declared_assessment.result.loss_residual_m3).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}</strong><span>m³ · avaliação manual · cobertura declarada</span></div>}
             {item.missing.length > 0 && <div className="integration-month-issues"><strong>Dados pendentes</strong><ul>{item.missing.map((missing, index) => <li key={index}>{label(missing)}</li>)}</ul></div>}
             {item.problems?.length > 0 && <div className="integration-month-issues"><strong>Para revisar</strong><ul>{item.problems.map((problem, index) => <li key={index}>{label(problem)}</li>)}</ul></div>}
             <SourceDetails sources={item.data_sources} />

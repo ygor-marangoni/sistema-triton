@@ -56,7 +56,7 @@ try {
     $state = (& $python $support state | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Não foi possível ler a revisão Alembic do banco de teste.' }
     Write-Output "Banco de teste confirmado; estado inicial: $state"
-    $allowed = @('empty', '0006_nullable_interval_volume', '0007_integration_history', '0008_proven_intervals', '0009_property_archive_tariff_source', '0010_period_constraints')
+    $allowed = @('empty', '0006_nullable_interval_volume', '0007_integration_history', '0008_proven_intervals', '0009_property_archive_tariff_source', '0010_period_constraints', '0011_meter_coordinates')
     if ($state -notin $allowed) { throw "Revisão não permitida para o teste: $state" }
 
     if ($VerifyOnly) {
@@ -73,9 +73,9 @@ try {
     & $python $support seed
     if ($LASTEXITCODE -ne 0) { throw 'Não foi possível preparar a fixture legada; nenhum registro foi removido.' }
 
-    if ($state -ne '0010_period_constraints') {
-        & $alembic upgrade 0010_period_constraints
-        if ($LASTEXITCODE -ne 0) { throw 'Migração até 0010 falhou; o banco foi mantido para inspeção.' }
+    if ($state -ne '0011_meter_coordinates') {
+        & $alembic upgrade 0011_meter_coordinates
+        if ($LASTEXITCODE -ne 0) { throw 'Migração até 0011 falhou; o banco foi mantido para inspeção.' }
     }
 
     & $python $support verify

@@ -31,7 +31,7 @@ from app.services.permit_pdf import MAX_PDF_BYTES, inspect_pdf
 from app.schemas import AdminPropertyIn, AdminUserIn, AdminUserPatch, AlertEvaluationOut, AlertOut, AlertResolveIn, AneelTariffImportIn, CollectionRunOut, DemandOut, DemandPatch, HydrometerIn, HydrometerOut, HydrometerReadingIn, HydrometerReadingOut, LevelImageConfirmationOut, LevelImageReviewOut, LevelImageReviewRevisionOut, LevelImageSuggestionIn, LevelReadingIn, LevelReadingOut, LevelStationIn, LevelStationOut, LevelStationUpdate, LoginIn, MeteorologicalObservationOut, MeteorologicalStationIn, MeteorologicalStationOut, MeteorologyOut, MeteorologySyncIn, MeteorologySyncOut, OutorgaIn, OutorgaOut, PropertyIn, PropertyOut, PropertyPatch, RegisterIn, ReservoirIn, ReservoirMapOut, ReservoirOut, RulerCalibrationIn, TariffIn, TariffOut, UserOut
 from app.services.domain import compare_month, energy_estimate, reservoir_volume, water_balance
 from app.services.permit_links import resolve_link
-from app.services.demo import demo_balance, demo_permit_comparison, demo_weather, is_demo_property
+from app.services.demo import demo_balance, demo_weather, is_demo_property
 from app.services.alerts import daily_extrapolation_candidates, expired_outorga_candidate, level_quality_review_candidate, missing_outorga_candidate, quality_review_candidate, stale_measurement_candidate
 from app.services.geometry import validate_polygon_kml as validate_kml_polygon
 from app.integrations.inmet import InmetAdapter, InmetError, load_csv_schema
@@ -401,6 +401,12 @@ def get_property(property_id: int, db: Db, user: CurrentUser):
     return property_view(prop)
 
 
+@app.get("/properties/{property_id}/map-geometry")
+def get_property_map_geometry(property_id: int, db: Db, user: CurrentUser):
+    prop = ensure_property(db, property_id, user)
+    return {"property_id": prop.id, "boundary_kml": prop.boundary_kml}
+
+
 @app.patch("/properties/{property_id}", response_model=PropertyOut)
 def edit_property(property_id: int, data: PropertyPatch, db: Db, user: CurrentUser):
     prop = ensure_property(db, property_id, user)
@@ -663,11 +669,34 @@ def readings_for_outorga_period(db, property_id, outorga_id, start, end):
                 continue
             result.append(SimpleNamespace(id=row.id, external_id=row.external_id,
                 observed_at=observed, interval_start_at=interval_start, created_at=_aware_utc(row.created_at),
-                volume_m3=row.volume_m3, unit=row.unit, quality=row.quality, source=row.source,
+                volume_m3=row.volume_m3, flow_m3_h=row.flow_m3_h, hydrometer_id=meter.id, unit=row.unit, quality=row.quality, source=row.source,
                 outorga_link_id=link.id if link else None,
                 resolved_outorga_id=resolved_id,
                 outorga_link_status="confirmado" if link else link_status))
     return result
+
+
+@app.get("/outorgas/{outorga_id}/usage/annual")
+def annual_outorga_usage(outorga_id: int, db: Db, user: CurrentUser, year: int = Query(ge=2000, le=2100)):
+    outorga = ensure_outorga(db, outorga_id, user)
+    today = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    if year > today.year:
+        raise HTTPException(status_code=422, detail="O ano solicitado ainda não ocorreu")
+    start = datetime(year, 1, 1, tzinfo=ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)
+    end = datetime(year + 1, 1, 1, tzinfo=ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)
+    if year == today.year:
+        end = min(end, datetime.now(timezone.utc))
+    readings = readings_for_outorga_period(db, outorga.property_id, outorga.id, start, end)
+    demands = {demand.month: demand for demand in outorga.demands}
+    months = []
+    for month in range(1, 13):
+        demand = demands.get(month)
+        if not demand:
+            months.append({"month": month, "measured_volume_m3": None, "monthly_reference_limit_m3": None, "status": "limite não cadastrado", "coverage": "incompleto"})
+            continue
+        comparison = compare_month(outorga, demand, readings, year, month)
+        months.append({key: comparison[key] for key in ("month", "measured_volume_m3", "monthly_reference_limit_m3", "status", "coverage", "missing_days", "pending_readings")})
+    return {"outorga_id": outorga.id, "year": year, "months": months, "coverage": "incompleto", "unit": "m³"}
 
 
 @app.get("/hydrometers/{hydrometer_id}/readings", response_model=list[HydrometerReadingOut])
@@ -860,7 +889,11 @@ def level_image_review_values(review: LevelImageReview) -> dict:
     }
 
 
-@app.post("/level-stations/{station_id}/image-reviews", status_code=201, response_model=LevelImageReviewOut)
+def retired_image_reading():
+    raise HTTPException(status_code=410, detail="Leitura assistida por imagem descontinuada. Registre o nível diretamente.")
+
+
+@app.post("/level-stations/{station_id}/image-reviews", status_code=201, response_model=LevelImageReviewOut, dependencies=[Depends(retired_image_reading)])
 def upload_level_image(
     station_id: int,
     db: Db,
@@ -947,7 +980,7 @@ def get_level_image(review_id: int, db: Db, user: CurrentUser):
     return FileResponse(path, media_type=review.content_type, filename=review.original_name, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
 
 
-@app.post("/level-image-reviews/{review_id}/suggestion", response_model=LevelImageReviewOut)
+@app.post("/level-image-reviews/{review_id}/suggestion", response_model=LevelImageReviewOut, dependencies=[Depends(retired_image_reading)])
 def suggest_level_image_value(review_id: int, data: LevelImageSuggestionIn, db: Db, user: CurrentUser):
     review = ensure_level_image_review(db, review_id, user)
     station = ensure_level_station(db, review.station_id, user)
@@ -965,7 +998,7 @@ def suggest_level_image_value(review_id: int, data: LevelImageSuggestionIn, db: 
     return review
 
 
-@app.post("/level-image-reviews/{review_id}/calibrate", response_model=LevelImageReviewOut)
+@app.post("/level-image-reviews/{review_id}/calibrate", response_model=LevelImageReviewOut, dependencies=[Depends(retired_image_reading)])
 def calibrate_level_image(review_id: int, data: RulerCalibrationIn, db: Db, user: CurrentUser):
     review = ensure_level_image_review(db, review_id, user)
     station = ensure_level_station(db, review.station_id, user)
@@ -999,7 +1032,7 @@ def calibrate_level_image(review_id: int, data: RulerCalibrationIn, db: Db, user
     return review
 
 
-@app.post("/level-image-reviews/{review_id}/confirm", response_model=LevelImageConfirmationOut)
+@app.post("/level-image-reviews/{review_id}/confirm", response_model=LevelImageConfirmationOut, dependencies=[Depends(retired_image_reading)])
 def confirm_level_image(review_id: int, data: LevelImageSuggestionIn, db: Db, user: CurrentUser):
     review = ensure_level_image_review(db, review_id, user)
     if review.status != "pending_review":
@@ -1143,7 +1176,7 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
     today = now.date()
     candidates: dict[str, dict] = {}
     threshold = settings.alert_stale_after_hours
-    evidence = {"hydrometers": [], "stations": [], "permits": [], "image_reviews": [], "latest_collection": None}
+    evidence = {"hydrometers": [], "stations": [], "permits": [], "latest_collection": None}
     collection = db.scalar(select(CollectionRun).where(CollectionRun.property_id == property_id).order_by(CollectionRun.id.desc()).limit(1))
     if collection and collection.status == "failed":
         fingerprint = f"collection-failed:{collection.source}:{collection.station_id}"
@@ -1176,14 +1209,6 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
             review = level_quality_review_candidate(station, reading)
             if review:
                 candidates[review["fingerprint"]] = review
-
-    for image_review in db.scalars(select(LevelImageReview).where(LevelImageReview.property_id == property_id, LevelImageReview.status.in_(("inconclusive", "pending_review")))).all():
-        evidence["image_reviews"].append(image_review.id)
-        fingerprint = f"image-review:{image_review.id}"
-        candidates[fingerprint] = {
-            "fingerprint": fingerprint, "origin": "imagem de régua", "rule": "Imagem pendente de revisão", "severity": "warning",
-            "details": {"review_id": image_review.id, "station_id": image_review.station_id, "captured_at": image_review.captured_at.isoformat(), "status": image_review.status, "message": "Confira a imagem e confirme uma leitura válida."},
-        }
 
     permits = db.scalars(select(Outorga).options(selectinload(Outorga.demands)).where(Outorga.property_id == property_id, Outorga.is_active.is_(True)).order_by(Outorga.id)).all()
     for permit in permits:
@@ -1226,7 +1251,7 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
             alert.severity = candidate["severity"]
 
     active_fingerprints = set(candidates)
-    reconcilable_prefixes = ("stale:", "missing-outorga:", "expired-outorga:", "reading-review:", "image-review:", "collection-failed:")
+    reconcilable_prefixes = ("stale:", "missing-outorga:", "expired-outorga:", "reading-review:", "collection-failed:")
     open_alerts = db.scalars(select(Alert).where(Alert.property_id == property_id, Alert.status == "open")).all()
     for alert in open_alerts:
         if not alert.fingerprint.startswith(reconcilable_prefixes) or alert.fingerprint in active_fingerprints:
@@ -1244,7 +1269,7 @@ def evaluate_property_alerts(property_id: int, db: Db, user: CurrentUser):
     evidence["candidate_details"] = candidates
     evidence["stale_after_hours"] = threshold
     db.add(AlertEvaluation(property_id=property_id, user_id=user.id, evaluated_at=now,
-        rules=["medição atrasada", "outorga ausente ou vencida", "leitura ou imagem pendente", "excesso diário cadastrado", "falha da última coleta"], evidence=jsonable_encoder(evidence)))
+        rules=["medição atrasada", "outorga ausente ou vencida", "leitura pendente", "excesso diário cadastrado", "falha da última coleta"], evidence=jsonable_encoder(evidence)))
     db.commit()
     active_count = len(db.scalars(select(Alert.id).where(Alert.property_id == property_id, Alert.status == "open")).all())
     result_alerts = db.scalars(select(Alert).where(Alert.property_id == property_id).order_by(Alert.occurred_at.desc()).limit(100)).all()
@@ -1285,7 +1310,7 @@ def dashboard(property_id: int, db: Db, user: CurrentUser):
             month_start = datetime.combine(today.replace(day=1), time.min, ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)
             month_end = datetime.combine(today + timedelta(days=1), time.min, ZoneInfo("America/Sao_Paulo")).astimezone(timezone.utc)
             readings = readings_for_outorga_period(db, property_id, permit.id, month_start, month_end)
-            summary = demo_permit_comparison(permit, demand, today) if is_demo_property(settings, user, prop) and permit.is_demo else compare_month(permit, demand, readings, today.year, today.month)
+            summary = compare_month(permit, demand, readings, today.year, today.month)
             permit_summaries.append({"outorga_id": permit.id, "name": permit.name, "validity_status": "inativa" if not permit.is_active else ("vigente" if permit.valid_from <= today <= permit.valid_until else "fora da vigência"), **summary})
     for reservoir in reservoirs:
         for meter in reservoir.hydrometers:

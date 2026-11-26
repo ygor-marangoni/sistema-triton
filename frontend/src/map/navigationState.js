@@ -1,4 +1,4 @@
-const allowedTabs = new Set(['Início', 'Cadastro', 'Evaporação', 'Meteorologia', 'Outorga', 'Hidrômetros', 'Estação / nível', 'Energia', 'Alertas'])
+const allowedTabs = new Set(['Início', 'Cadastro', 'Evaporação', 'Uso hídrico', 'Meteorologia', 'Outorga', 'Hidrômetros', 'Estação / nível', 'Energia', 'Alertas'])
 const navigationKey = (userId) => `triton:navigation:${userId}`
 const draftKey = (userId, propertyId) => `triton:reservoir-draft:${userId}:${propertyId}`
 

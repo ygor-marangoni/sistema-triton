@@ -59,7 +59,7 @@ def revision_rows(db, property_id, record_type, record_id, skip, limit):
 @app.patch("/hydrometers/{meter_id}", response_model=HydrometerOut)
 def edit_meter(meter_id: int, data: MeterEdit, db: Db, user: CurrentUser):
     meter, reservoir = meter_for_user(db, user, meter_id)
-    values = data.model_dump()
+    values = data.model_dump(exclude_unset=True)
     previous = {key: getattr(meter, key) for key in values}
     audit(db, user, reservoir.property_id, "hydrometer", meter.id, "edit", previous, values)
     for key, value in values.items(): setattr(meter, key, value)

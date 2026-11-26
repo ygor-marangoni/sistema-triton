@@ -6,7 +6,7 @@ import { createServer } from 'vite'
 import { createPropertyRequestGuard } from './services/propertyRequestGuard.js'
 
 // Fixtures sintéticas: não usam a API nem gravam no banco da aplicação.
-let server, GrantTab, LevelTab, EnergyTab, HydrometerTab, WorkspaceSummary, ReservoirBanner, PropertyEditor, ResidualHistoryChart, validMonthlyResiduals, BalanceEntry, MonthlyCoverage, StageCurves, PermitDocuments, RecordManagement, EvaporationTab, documentErrorMessage
+let server, GrantTab, LevelTab, EnergyTab, HydrometerTab, WorkspaceSummary, ReservoirBanner, PropertyEditor, ResidualHistoryChart, validMonthlyResiduals, BalanceEntry, MonthlyCoverage, StageCurves, PermitDocuments, RecordManagement, EvaporationTab, WaterUseOverview, documentErrorMessage
 before(async () => {
   server = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' })
   ;({ GrantTab, LevelTab, EnergyTab } = await server.ssrLoadModule('/src/App.jsx'))
@@ -21,6 +21,7 @@ before(async () => {
   ;({ default: PermitDocuments, documentErrorMessage } = await server.ssrLoadModule('/src/components/PermitDocuments.jsx'))
   ;({ default: RecordManagement } = await server.ssrLoadModule('/src/components/RecordManagement.jsx'))
   ;({ default: EvaporationTab } = await server.ssrLoadModule('/src/components/EvaporationTab.jsx'))
+  ;({ default: WaterUseOverview } = await server.ssrLoadModule('/src/components/WaterUseOverview.jsx'))
 })
 after(async () => { await server?.close() })
 
@@ -81,13 +82,52 @@ test('energia incompleta não inventa tarifa ou custo e tolera período parcial'
   assert.doesNotMatch(html, /class="monitor-status"/)
 })
 
-test('outorga com dados simulados apresenta o total registrado como parcial', () => {
+test('painel de outorga apresenta registros parciais sem inventar cobertura', () => {
   const grant = { id: 4, name: 'Outorga de teste', valid_until: '2030-12-31', water_body: 'Córrego de teste', permit_number: '123', municipality: 'Cidade', state: 'MG', irrigated_area_ha: 2, demands: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, max_flow_m3_h: 5, daily_hours: 2, authorized_days: 10, monthly_volume_m3: 100 })) }
   const comparison = { outorga_id: 4, year: 2026, month: 1, measured_volume_m3: 12, monthly_reference_limit_m3: 100, operating_days_used: 1, operating_days_authorized: 10, non_transferable_surplus_m3: 0, extrapolated_m3: 2, missing_days: 30, daily: [{ date: '2026-01-01', volume_m3: 12, status: 'extrapolado', extrapolated_m3: 2, non_transferable_surplus_m3: 0 }], notes: 'Leituras registradas não comprovam cobertura contínua.' }
   const html = render(GrantTab, { outorgas: [grant], comparisons: [comparison] })
-  assert.match(html, /12 m³ registrados/)
-  assert.match(html, /Cobertura incompleta/)
-  assert.match(html, /Extrapolado/)
+  assert.match(html, /12 m³/)
+  assert.match(html, /Uso parcial registrado/)
+  assert.match(html, /Uso diário/)
+  assert.match(html, /Uso semanal/)
+  assert.match(html, /Uso do limite mensal/)
+  assert.match(html, /Vazões informadas/)
+  assert.match(html, /Ausência de leitura não significa consumo zero/)
+})
+
+test('uso hídrico vazio mostra o caminho de cadastro sem inventar valores', () => {
+  const html = render(WaterUseOverview, { outorgas: [], comparisons: [], onNavigate: noop })
+  assert.match(html, /Comece por uma outorga/)
+  assert.match(html, /Histórico anual de uso/)
+  assert.match(html, /Sem registros para este ano/)
+  assert.doesNotMatch(html, /0 m³/)
+  const failed = render(WaterUseOverview, { outorgas: [], comparisons: [], loadError: 'Falha de consulta' })
+  assert.match(failed, /Falha de consulta/)
+  assert.doesNotMatch(failed, /Comece por uma outorga/)
+})
+
+test('uso hídrico apresenta outorga e cobrança indisponível sem presumir dados', () => {
+  const permit = { id: 7, name: 'Outorga sintética', permit_number: 'FIXTURE', water_body: 'Rio fictício', issued_on: '2025-01-01', valid_until: '2027-12-31' }
+  const comparison = { outorga_id: 7, year: 2026, month: 1, measured_volume_m3: null, daily_reference_limit_m3: 10, monthly_reference_limit_m3: 100, missing_days: 31, daily: [], eligible_intervals: [] }
+  const html = render(WaterUseOverview, { outorgas: [permit], comparisons: [comparison], dashboard: {} })
+  assert.match(html, /Outorga sintética/)
+  assert.match(html, /Uso de hoje/)
+  assert.match(html, /Sem leitura hoje/)
+  assert.match(html, /Valor indisponível/)
+  assert.doesNotMatch(html, /R\$ 0/)
+})
+
+test('evaporação mostra perda em metros cúbicos e identifica período e simulação', () => {
+  const result = { is_demo: true, status: 'perda residual estimada pelo balanço hídrico', loss_residual_m3: 435.5, loss_residual_mm_day: 4.01, period_start: '2026-10-01', period_end: '2026-10-31', history: [] }
+  const html = render(EvaporationTab, { propertyId: 1, balance: result, onNavigate: noop, outorgas: [{ id: 7, name: 'Outorga sintética' }], dashboard: {} })
+  assert.doesNotMatch(html, /Outorga sintética|Acompanhamento da outorga/)
+  assert.match(html, /435,5 m³/)
+  assert.match(html, /01\/10\/2026 a 31\/10\/2026/)
+  assert.match(html, /simulação/)
+  assert.doesNotMatch(html, /4,01 mm\/dia/)
+  const inconsistent = render(EvaporationTab, { propertyId: 1, balance: { ...result, status: 'inconsistente', loss_residual_m3: -2 }, onNavigate: noop })
+  assert.match(inconsistent, /Dados insuficientes/)
+  assert.doesNotMatch(inconsistent, /-2 m³/)
 })
 
 test('respostas antigas ou de outra propriedade são descartadas', () => {
@@ -165,16 +205,16 @@ test('edição inicia com os valores salvos e sem alterações pendentes', () =>
 
 test('gráfico não transforma lacunas, duplicidades ou períodos parciais em dados válidos', () => {
   const status = 'perda residual estimada pelo balanço hídrico'
-  const jan = { reservoir_id: 1, period_start: '2026-01-01', period_end: '2026-01-31', status, coverage: 'comprovada', origin: 'medida', loss_residual_mm_day: 2.5 }
-  const feb = { period_start: '2026-02-01', period_end: '2026-02-28', status, coverage: 'declarada completa', loss_residual_mm_day: null }
-  const march = { period_start: '2026-03-01', period_end: '2026-03-15', status, coverage: 'comprovada', loss_residual_mm_day: 3 }
+  const jan = { reservoir_id: 1, period_start: '2026-01-01', period_end: '2026-01-31', status, coverage: 'comprovada', origin: 'medida', loss_residual_m3: 2.5 }
+  const feb = { period_start: '2026-02-01', period_end: '2026-02-28', status, coverage: 'declarada completa', loss_residual_m3: null }
+  const march = { period_start: '2026-03-01', period_end: '2026-03-15', status, coverage: 'comprovada', loss_residual_m3: 3 }
   assert.deepEqual(validMonthlyResiduals([jan, feb, march]), [{ month: '2026-01', value: 2.5, origin: 'medida' }])
   assert.deepEqual(validMonthlyResiduals([jan, jan]), [])
   assert.match(render(ResidualHistoryChart, { history: [] }), /Sem histórico calculado/)
   assert.match(render(ResidualHistoryChart, { history: [jan] }), /2,5/)
   assert.match(render(ResidualHistoryChart, { history: [jan] }), /medida/)
   assert.match(render(ResidualHistoryChart, { history: [jan, { ...jan, period_start: '2026-03-01', period_end: '2026-03-31' }] }), /sem dados/)
-  assert.deepEqual(validMonthlyResiduals([{ ...jan, loss_residual_mm_day: '' }]), [])
+  assert.deepEqual(validMonthlyResiduals([{ ...jan, loss_residual_m3: '' }]), [])
   assert.deepEqual(validMonthlyResiduals([{ ...jan, coverage: 'declarada completa' }]), [])
   assert.deepEqual(validMonthlyResiduals([jan, { ...jan, reservoir_id: 2, period_start: '2026-02-01', period_end: '2026-02-28' }]), [])
 })

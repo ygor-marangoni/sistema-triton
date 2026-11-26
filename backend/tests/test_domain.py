@@ -88,6 +88,19 @@ def _eligible_reading(reading_id, start, end, volume, **extra):
         unit="m³", quality="validada", **extra)
 
 
+def test_simultaneous_intervals_on_different_meters_are_not_duplicates():
+    permit = SimpleNamespace(valid_from=date(2026, 1, 1), valid_until=date(2026, 12, 31))
+    demand = SimpleNamespace(max_flow_m3_h=Decimal(10), daily_hours=Decimal(10), authorized_days=20, monthly_volume_m3=Decimal(2000))
+    start = datetime(2026, 3, 2, 3, tzinfo=timezone.utc)
+    end = datetime(2026, 3, 2, 6, tzinfo=timezone.utc)
+    rows = [_eligible_reading(1, start, end, '10', hydrometer_id=1, external_id='same'),
+            _eligible_reading(2, start, end, '20', hydrometer_id=2, external_id='same')]
+    result = compare_month(permit, demand, rows, 2026, 3)
+    assert result['measured_volume_m3'] == Decimal(30)
+    assert result['duplicate_readings'] == 0
+    assert result['unassigned_intervals'] == 0
+
+
 def _comparison(readings):
     permit = SimpleNamespace(id=7, valid_from=date(2026, 1, 1), valid_until=date(2026, 12, 31))
     demand = SimpleNamespace(max_flow_m3_h=Decimal(10), daily_hours=Decimal(10), authorized_days=20, monthly_volume_m3=Decimal(2000))

@@ -26,8 +26,8 @@ def ensure_demo_database(db, settings):
         raise SystemExit("Carga recusada: use exclusivamente um banco local triton_demo ou triton_integration_test.")
     if db.execute(text("SELECT current_database()")).scalar_one() != url.database:
         raise SystemExit("Carga recusada: o servidor retornou um banco diferente do configurado.")
-    if db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() != "0010_period_constraints":
-        raise SystemExit("Carga recusada: o banco de demonstração precisa estar na revisão 0010.")
+    if db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() != "0011_meter_coordinates":
+        raise SystemExit("Carga recusada: o banco de demonstração precisa estar na revisão 0011.")
 
 
 def main():

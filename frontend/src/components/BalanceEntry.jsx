@@ -100,9 +100,9 @@ export default function BalanceEntry({ history, onUpdated, propertyId }) {
         <div className="integration-form-actions"><span>Campos vazios ficam ausentes; nenhum valor é completado como zero.</span><button className="button primary"><Save size={15} />Registrar avaliação declarada</button></div>
       </form>
     </> : <p className="integration-placeholder">Selecione um período para consultar evidências e montar o balanço.</p>}
-    <IntegrationNotice type={result?.loss_residual_mm_day == null ? 'info' : 'success'}>{result && (result.loss_residual_mm_day == null
+    <IntegrationNotice type={result?.loss_residual_mm_day == null || result?.loss_residual_m3 == null ? 'info' : 'success'}>{result && (result.loss_residual_mm_day == null || result.loss_residual_m3 == null
       ? `${result.calculation_mode === 'automatico' ? 'Cálculo automático' : 'Avaliação manual'} · ${result.coverage || 'cobertura declarada'} · ${result.status} · ${(result.missing || []).concat(result.problems || []).join('; ')}`
-      : `${result.loss_residual_mm_day} mm/dia · perda residual estimada · cobertura ${result.coverage}`)}</IntegrationNotice>
+      : `${result.loss_residual_m3} m³ · perda residual estimada · cobertura ${result.coverage}`)}</IntegrationNotice>
     <IntegrationNotice type="error">{error}</IntegrationNotice>
   </section>
 }

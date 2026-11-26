@@ -1,12 +1,13 @@
-import { ArrowRight, ChevronDown, Droplets } from 'lucide-react'
-import { useState } from 'react'
+import { ArrowRight, ChevronDown } from 'lucide-react'
+import { lazy, Suspense, useState } from 'react'
 import ResidualHistoryChart from './ResidualHistoryChart'
 import BalanceEntry from './BalanceEntry'
 import MonthlyCoverage from './MonthlyCoverage'
 import { IntegrationNotice } from './IntegrationUI'
 import { waterService } from '../services/triton'
+const BalanceMap = lazy(() => import('./BalanceMap'))
 
-export default function EvaporationTab({ balance, onNavigate, onUpdated, propertyId }) {
+export default function EvaporationTab({ balance, onNavigate, onUpdated, propertyId, property, meters, reservoirs, metersError, reservoirsError }) {
   const currentYear = Number(new Intl.DateTimeFormat('en', { timeZone: 'America/Sao_Paulo', year: 'numeric' }).format(new Date()))
   const [year, setYear] = useState(String(currentYear)), [historical, setHistorical] = useState(null), [historyError, setHistoryError] = useState(''), [historyLoading, setHistoryLoading] = useState(false)
   const history = historical?.history || balance?.history
@@ -21,12 +22,12 @@ export default function EvaporationTab({ balance, onNavigate, onUpdated, propert
     if (onUpdated) await onUpdated()
     if (historical) { const { data } = await waterService.balanceHistory(propertyId, historical.year); setHistorical(data) }
   }
+  const volume = balance?.status === 'perda residual estimada pelo balanço hídrico' && balance.loss_residual_m3 != null && Number.isFinite(Number(balance.loss_residual_m3)) && Number(balance.loss_residual_m3) >= 0 ? Number(balance.loss_residual_m3) : null
+  const period = balance?.period_start && balance?.period_end ? `${balance.period_start.split('-').reverse().join('/')} a ${balance.period_end.split('-').reverse().join('/')}` : null
   return <div className="monitor-page water-balance-page">
     <header className="monitor-heading"><div><p className="eyebrow">BALANÇO HÍDRICO</p><h2>Perda residual do reservatório</h2><p>Entradas, saídas e variação de volume no período.</p></div></header>
-    <section className="balance-hero">
-      <div className="balance-hero-copy"><span className="balance-hero-label"><Droplets size={17} aria-hidden="true" /> PERDA RESIDUAL ESTIMADA{balance?.is_demo ? ' · SIMULAÇÃO' : ''}</span><h3>{balance?.loss_residual_mm_day == null ? 'Ainda não é possível calcular' : `${Number(balance.loss_residual_mm_day).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} mm/dia`}</h3><p>{balance?.loss_residual_mm_day == null ? 'O cálculo depende de medições e informações compatíveis para o mesmo intervalo.' : balance?.is_demo ? 'Exemplo calculado com valores inteiramente simulados para o último mês completo.' : 'Resultado estimado para o intervalo informado.'}</p><span className="balance-hero-caption">{balance?.is_demo ? 'Demonstração: não representa uma medição real.' : 'O resultado depende das premissas e da cobertura dos registros.'}</span></div>
-      <div className="balance-hero-art"><img src="/images/reservoir-onboarding.png" alt="" /></div>
-    </section>
+    <div className="balance-latest"><span>Perda residual estimada{balance?.is_demo ? ' · simulação' : ''}{period ? ` · ${period}` : ''}</span><strong>{volume == null ? 'Dados insuficientes' : `${volume.toLocaleString('pt-BR', { maximumFractionDigits: 2 })} m³`}</strong></div>
+    <Suspense fallback={<div className="balance-map-placeholder">Carregando mapa…</div>}><BalanceMap property={property} meters={meters} reservoirs={reservoirs} metersError={metersError} reservoirsError={reservoirsError} /></Suspense>
     <ResidualHistoryChart history={history} loading={historyLoading} toolbar={!balance?.is_demo && <label className="residual-year-filter"><span>Ano</span><span className="residual-year-select"><select aria-label="Ano do histórico" value={year} onChange={(event) => loadYear(event.target.value)} disabled={historyLoading}>{years.map((option) => <option key={option} value={option}>{option}</option>)}</select><ChevronDown size={15} aria-hidden="true" /></span></label>} />
     <IntegrationNotice type="error">{typeof historyError === 'string' ? historyError : 'Falha ao carregar o histórico.'}</IntegrationNotice>
     {!balance?.is_demo && <BalanceEntry history={history} onUpdated={refreshHistory} propertyId={propertyId} />}
@@ -37,6 +38,6 @@ export default function EvaporationTab({ balance, onNavigate, onUpdated, propert
       <article><span className="balance-requirement-art"><img src="/images/balance-flow.png" alt="" /></span><div><h4>Entradas e saídas</h4><p>Volumes medidos e outras saídas quantificadas no período.</p><button type="button" onClick={() => onNavigate('Hidrômetros')}>Ver hidrômetros <ArrowRight size={15} aria-hidden="true" /></button></div></article>
       <article><span className="balance-requirement-art"><img src="/images/balance-rain.png" alt="" /></span><div><h4>Precipitação</h4><p>Chuva acumulada e duração correspondente ao intervalo.</p><button type="button" onClick={() => onNavigate('Meteorologia')}>Ver meteorologia <ArrowRight size={15} aria-hidden="true" /></button></div></article>
     </div>
-    <section className="balance-method"><div><h3>Como interpretar</h3><p>O balanço considera entradas, chuva, saídas e variação do armazenamento. A perda residual não é uma medição direta de evaporação.</p></div><div className="balance-equation"><span>RELAÇÃO ENTRE OS VOLUMES</span><strong>Entradas + chuva − saídas − variação do volume</strong><small>O nível é convertido em volume apenas com uma relação geométrica aplicável.</small></div></section>
+    <section className="balance-method"><div><h3>Como interpretar</h3><p>Comparamos a água que entrou e saiu com a mudança de volume do reservatório. A diferença é uma perda estimada, não uma medição direta de evaporação.</p></div></section>
   </div>
 }

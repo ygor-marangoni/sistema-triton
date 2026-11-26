@@ -11,13 +11,14 @@ from sqlalchemy.engine import make_url
 
 
 DATABASE_NAME = "triton_integration_test"
-EXPECTED_HEAD = "0010_period_constraints"
+EXPECTED_HEAD = "0011_meter_coordinates"
 ALLOWED_REVISIONS = {
     None,
     "0006_nullable_interval_volume",
     "0007_integration_history",
     "0008_proven_intervals",
     "0009_property_archive_tariff_source",
+    "0010_period_constraints",
     EXPECTED_HEAD,
 }
 MARKER_EMAIL = "synthetic-legacy-20261125@example.invalid"
@@ -175,7 +176,7 @@ def _verify(connection):
     required_columns = {
         "properties": {"is_archived", "archived_at"},
         "outorgas": {"is_active"},
-        "hydrometers": {"is_active"},
+        "hydrometers": {"is_active", "latitude", "longitude"},
         "hydrometer_readings": {"interval_start_at"},
         "stage_volume_curves": {"valid_from", "valid_until", "is_approved"},
         "energy_tariffs": {"source_reference", "source_details", "created_by_id"},
@@ -274,7 +275,7 @@ def main():
             elif action == "seed":
                 revision = _state(connection)
                 if revision not in ALLOWED_REVISIONS - {None}:
-                    raise RuntimeError("Banco precisa estar numa revisão conhecida entre 0006 e 0010.")
+                    raise RuntimeError("Banco precisa estar numa revisão conhecida entre 0006 e 0011.")
                 result = _seed_legacy(connection)
                 print(f"Seed sintético {'criado' if result.get('created') else 'já presente'}; banco={database}; role={user}.")
             elif action == "verify":

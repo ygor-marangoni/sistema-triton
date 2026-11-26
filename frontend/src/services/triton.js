@@ -34,12 +34,14 @@ export const propertyService = {
   restore: (id) => api.post(`/properties/${id}/restore`),
   dashboard: (id) => api.get(`/dashboard/${id}`),
   reservoirs: (id) => api.get(`/properties/${id}/reservoirs`),
+  geometry: (id) => api.get(`/properties/${id}/map-geometry`),
   reservoirGeometry: (reservoirId) => api.get(`/reservoirs/${reservoirId}/map-geometry`),
   createReservoir: (propertyId, data) => api.post(`/properties/${propertyId}/reservoirs`, data),
 }
 
 export const waterService = {
   outorgas: (propertyId) => listAll(`/properties/${propertyId}/outorgas`),
+  annualOutorgaUsage: (id, year) => api.get(`/outorgas/${id}/usage/annual`, { params: { year } }),
   createOutorga: (data) => api.post('/outorgas', data),
   updateDemand: (outorgaId, month, data) => api.patch(`/outorgas/${outorgaId}/monthly-demands/${month}`, data),
   meters: (propertyId) => listAll('/hydrometers', { property_id: propertyId }),
@@ -99,20 +101,4 @@ export const meteorologyService = {
   get: (propertyId, params = {}) => api.get(`/properties/${propertyId}/meteorology`, { params }),
   setStation: (propertyId, data) => api.put(`/properties/${propertyId}/meteorology/station`, data),
   sync: (propertyId, year) => api.post(`/properties/${propertyId}/meteorology/sync`, { year }),
-}
-
-export const rulerImageService = {
-  list: (stationId, params = {}) => api.get(`/level-stations/${stationId}/image-reviews`, { params }),
-  upload: (stationId, file, capturedAt) => {
-    const form = new FormData()
-    form.append('file', file)
-    form.append('captured_at', capturedAt)
-    return api.post(`/level-stations/${stationId}/image-reviews`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
-  },
-  get: (reviewId) => api.get(`/level-image-reviews/${reviewId}`),
-  image: (reviewId) => api.get(`/level-image-reviews/${reviewId}/image`, { responseType: 'blob' }),
-  suggest: (reviewId, level_m) => api.post(`/level-image-reviews/${reviewId}/suggestion`, { level_m }),
-  calibrate: (reviewId, data) => api.post(`/level-image-reviews/${reviewId}/calibrate`, data),
-  confirm: (reviewId, level_m) => api.post(`/level-image-reviews/${reviewId}/confirm`, { level_m }),
-  history: (reviewId) => api.get(`/level-image-reviews/${reviewId}/history`),
 }

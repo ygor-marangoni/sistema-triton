@@ -81,7 +81,8 @@ def compare_month(outorga, demand, readings, year: int, month: int) -> dict:
             continue
 
         external_id = getattr(reading, "external_id", None)
-        identity = ("external", external_id) if external_id else (
+        meter_key = getattr(reading, "hydrometer_id", None)
+        identity = ("external", meter_key, external_id) if external_id else (
             ("id", getattr(reading, "id")) if getattr(reading, "id", None) is not None
             else ("interval", start_utc, observed_utc)
         )
@@ -120,15 +121,17 @@ def compare_month(outorga, demand, readings, year: int, month: int) -> dict:
 
     # Chronological sorting makes delayed imports deterministic. Overlapping
     # intervals are retained as evidence but cannot be summed twice.
-    last_end = None
+    last_end_by_meter = {}
     eligible_intervals = []
     for start_utc, observed_utc, value, reading, start_day, end_day in sorted(accepted, key=lambda row: (row[0], row[1], getattr(row[3], "id", 0) or 0)):
+        meter_key = getattr(reading, "hydrometer_id", None)
+        last_end = last_end_by_meter.get(meter_key)
         if last_end is not None and start_utc < last_end:
             pending += 1
             unassigned_intervals += 1
             needs_review(reading, "intervalo sobreposto a outra leitura", start_utc, observed_utc)
             continue
-        last_end = observed_utc
+        last_end_by_meter[meter_key] = observed_utc
         monthly_volume += value
         monthly_count += 1
         if start_day == end_day:
@@ -145,6 +148,8 @@ def compare_month(outorga, demand, readings, year: int, month: int) -> dict:
             "interval_start_at": start_utc,
             "observed_at": observed_utc,
             "volume_m3": value,
+            "flow_m3_h": getattr(reading, "flow_m3_h", None),
+            "hydrometer_id": getattr(reading, "hydrometer_id", None),
             "unit": getattr(reading, "unit", "m³"),
             "source": getattr(reading, "source", None),
             "quality": getattr(reading, "quality", None),

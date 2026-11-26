@@ -246,11 +246,13 @@ class HydrometerIn(BaseModel):
     kind: Literal["entrada", "saída"]
     rated_power_kw: Decimal | None = Field(default=None, gt=0, max_digits=10, decimal_places=3)
     rated_power_cv: Decimal | None = Field(default=None, gt=0, max_digits=10, decimal_places=3)
-    latitude: Decimal | None = Field(default=None, ge=-90, le=90)
-    longitude: Decimal | None = Field(default=None, ge=-180, le=180)
+    latitude: Decimal | None = Field(default=None, ge=-90, le=90, max_digits=9, decimal_places=6)
+    longitude: Decimal | None = Field(default=None, ge=-180, le=180, max_digits=9, decimal_places=6)
 
     @model_validator(mode="after")
     def power_choice(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Informe latitude e longitude juntas, ou deixe ambas vazias")
         if self.rated_power_kw and self.rated_power_cv:
             raise ValueError("Informe potência elétrica em kW ou potência mecânica em CV, não ambas")
         return self
@@ -709,9 +711,13 @@ class MeterEdit(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     rated_power_kw: Decimal | None = Field(default=None, gt=0, max_digits=10, decimal_places=3)
     rated_power_cv: Decimal | None = Field(default=None, gt=0, max_digits=10, decimal_places=3)
+    latitude: Decimal | None = Field(default=None, ge=-90, le=90, max_digits=9, decimal_places=6)
+    longitude: Decimal | None = Field(default=None, ge=-180, le=180, max_digits=9, decimal_places=6)
 
     @model_validator(mode="after")
     def power_choice(self):
+        if ("latitude" in self.model_fields_set) != ("longitude" in self.model_fields_set) or (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Informe latitude e longitude juntas, ou deixe ambas vazias")
         if self.rated_power_kw is not None and self.rated_power_cv is not None:
             raise ValueError("Informe potência em kW ou em CV, não ambas")
         return self

@@ -80,7 +80,7 @@ function sourceLabel(source) {
   return ({ manual: 'informado manualmente', simulada: 'simulado', dispositivo: 'dispositivo', imagem_revisada: 'imagem revisada' })[source] || source
 }
 
-export default function PropertyMapPage({ properties, selectedProperty, onOpenProperty, onAddProperty, onPropertyUpdated, onPropertyRestored, onEditProperty, dashboard, meters, outorgas, alerts, latestActivity, propertyDataPending, propertyLoadError, onNavigate, isDemo }) {
+export default function PropertyMapPage({ properties, selectedProperty, onOpenProperty, onAddProperty, onPropertyUpdated, onEditProperty, dashboard, meters, outorgas, alerts, latestActivity, propertyDataPending, propertyLoadError, onNavigate, isDemo }) {
   const [query, setQuery] = useState('')
   const [city, setCity] = useState('')
   const [locationFilter, setLocationFilter] = useState('all')
@@ -100,11 +100,6 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
   const [enabledReservoirs, setEnabledReservoirs] = useState([])
   const [reservoirLayers, setReservoirLayers] = useState([])
   const [reservoirError, setReservoirError] = useState('')
-  const [archivedOpen, setArchivedOpen] = useState(false)
-  const [archivedProperties, setArchivedProperties] = useState([])
-  const [archivedLoading, setArchivedLoading] = useState(false)
-  const [archivedError, setArchivedError] = useState('')
-  const [restoringId, setRestoringId] = useState(null)
   const markerRefs = useRef({})
 
   const filtered = useMemo(() => filterMapProperties(properties, { query, city, location: locationFilter }), [properties, query, city, locationFilter])
@@ -168,17 +163,6 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
     return () => { current = false }
   }, [activeProperty?.id])
 
-  useEffect(() => {
-    if (!archivedOpen) return
-    let current = true
-    setArchivedLoading(true)
-    setArchivedError('')
-    propertyService.archived()
-      .then(({ data }) => { if (current) setArchivedProperties(data) })
-      .catch((error) => { if (current) setArchivedError(errorMessage(error)) })
-      .finally(() => { if (current) setArchivedLoading(false) })
-    return () => { current = false }
-  }, [archivedOpen])
 
   useEffect(() => {
     if (!activeProperty || !enabledReservoirs.length) {
@@ -268,21 +252,10 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
     setEnabledReservoirs((current) => current.includes(reservoirId) ? current.filter((id) => id !== reservoirId) : [...current, reservoirId])
   }
 
-  async function restoreProperty(property) {
-    setRestoringId(property.id)
-    setArchivedError('')
-    try {
-      const { data } = await propertyService.restore(property.id)
-      setArchivedProperties((current) => current.filter((item) => item.id !== property.id))
-      onPropertyRestored?.(data)
-    } catch (error) { setArchivedError(errorMessage(error)) }
-    finally { setRestoringId(null) }
-  }
-
   const recentReadings = latestPropertyReadings(summary?.dashboard)
 
   return <section className="property-map-page">
-    <div className="map-page-heading"><div><p className="eyebrow">SEU ESPAÇO DE MONITORAMENTO</p><h1>Visão da operação</h1><p>Escolha uma propriedade e acompanhe seus dados em um só lugar.</p></div><div className="map-heading-actions"><span className="map-total">{properties.length} {properties.length === 1 ? 'propriedade' : 'propriedades'}</span><button className="button secondary" type="button" aria-expanded={archivedOpen} onClick={() => setArchivedOpen((value) => !value)}>{archivedOpen ? 'Fechar arquivadas' : 'Arquivadas'}</button>{properties.length > 0 && <button className="button secondary" type="button" onClick={onAddProperty}><MapPin size={15} aria-hidden="true" />Cadastrar propriedade</button>}</div></div>
+    <div className="map-page-heading"><div><p className="eyebrow">SEU ESPAÇO DE MONITORAMENTO</p><h1>Visão da operação</h1><p>Escolha uma propriedade e acompanhe seus dados em um só lugar.</p></div><div className="map-heading-actions"><span className="map-total">{properties.length} {properties.length === 1 ? 'propriedade' : 'propriedades'}</span>{properties.length > 0 && <button className="button secondary" type="button" onClick={onAddProperty}><MapPin size={15} aria-hidden="true" />Cadastrar propriedade</button>}</div></div>
     {isDemo && <div className="demo-map-note">Demonstração: as posições e os perímetros exibidos nesta conta são fictícios.</div>}
     <WorkspaceSummary properties={properties} selectedProperty={selectedProperty} loading={propertyDataPending} error={propertyLoadError} dashboard={dashboard} meters={meters} outorgas={outorgas} alerts={alerts} latestActivity={latestActivity} onNavigate={onNavigate} />
     <div className="map-filters">
@@ -345,6 +318,6 @@ export default function PropertyMapPage({ properties, selectedProperty, onOpenPr
         </section>}
       </aside>
     </div>}
-    {archivedOpen && <section className="map-archive-panel"><div className="map-archive-heading"><h3>Propriedades arquivadas</h3><button type="button" className="text-button" onClick={() => setArchivedOpen(false)}>Fechar</button></div>{archivedError && <p className="map-inline-error" role="alert">{archivedError}</p>}{archivedLoading ? <p className="map-muted">Carregando…</p> : archivedProperties.length ? archivedProperties.map((property) => <article className="map-archive-row" key={property.id}><span><b>{property.name}</b><small>{property.city}/{property.state}</small></span><button type="button" className="text-button" disabled={restoringId === property.id} onClick={() => restoreProperty(property)}>{restoringId === property.id ? 'Restaurando…' : 'Restaurar'}</button></article>) : !archivedError && <p className="map-muted">Nenhuma propriedade arquivada.</p>}</section>}
+
   </section>
 }

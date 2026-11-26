@@ -111,6 +111,8 @@
 .integration-text-button { min-height: 36px; padding: 6px 8px; }
 .integration-icon-button, .integration-page-button { width: 35px; height: 35px; border: 1px solid #deebe3; border-radius: 9px; background: #fff; color: #608374; }
 .integration-icon-button:hover, .integration-page-button:hover:not(:disabled), .integration-text-button:hover { background: #eff8f2; }
+.integration-icon-button, .integration-page-button { background: #176f61; border-color: #176f61; color: #fff; }
+.integration-icon-button:hover, .integration-page-button:hover:not(:disabled) { background: #10594e; border-color: #10594e; color: #fff; }
 .integration-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; color: #84968c; font-size: .72rem; }
 .integration-pagination > div { display: flex; gap: 6px; }
 .integration-page-button:disabled { opacity: .4; cursor: default; }
@@ -391,6 +393,8 @@
 /* Keep error feedback legible after component-specific state styles. */
 .integration-notice.error { border-color: #f0cfcc; background: #fff4f2; color: #8b1e24 !important; }
 .integration-load-error { border-color: #f0cfcc; background: #fff4f2; color: #8b1e24 !important; }
+.integration-load-error .text-button, .integration-notice.error .text-button { color: #8b1e24; }
+.integration-load-error .text-button:hover, .integration-notice.error .text-button:hover { color: #65161a; }
 .energy-source-error, .map-inline-error { color: #8b1e24 !important; }
 .app-dialog-form .app-dialog-error { color: #8b1e24 !important; }
 .content :is(.field, .integration-field) > select,

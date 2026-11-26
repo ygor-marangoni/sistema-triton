@@ -32,7 +32,7 @@ def client():
         engine = create_engine(postgres_test_url, pool_pre_ping=True)
         connection = engine.connect()
         revision = connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-        assert revision == "0010_period_constraints"
+        assert revision == "0011_meter_coordinates"
         connection.commit()
         outer_transaction = connection.begin()
         test_session = sessionmaker(
@@ -332,6 +332,31 @@ def test_permit_edit_state_and_link_history_protect_existing_readings(client):
     assert client.get(f"/outorgas/{permit['id']}/history").status_code == 404
 
 
+def test_annual_outorga_usage_preserves_gaps_and_user_isolation(client):
+    assert client.post('/auth/login', json={'email': 'a@example.com', 'password': 'Senha-Segura-123!'}).status_code == 200
+    prop, station = create_test_station(client)
+    demands = [{'month': month, 'max_flow_m3_h': 2, 'daily_hours': 5, 'authorized_days': 10, 'monthly_volume_m3': 100} for month in range(1, 13)]
+    fields = {'name': 'Outorga sintética', 'permit_number': 'FICTICIO-ANUAL', 'issued_on': '2025-01-01', 'valid_from': '2025-01-01', 'valid_until': '2027-12-31', 'water_body': 'Rio fictício', 'municipality': 'Cidade teste', 'coordinates_gms': 'teste', 'state': 'MG', 'irrigated_area_ha': 1}
+    permit = client.post('/outorgas', json=fields | {'property_id': prop['id'], 'demands': demands}).json()
+    response = client.get(f"/outorgas/{permit['id']}/usage/annual?year=2025")
+    assert response.status_code == 200
+    assert response.json()['coverage'] == 'incompleto'
+    assert len(response.json()['months']) == 12
+    assert all(month['measured_volume_m3'] is None for month in response.json()['months'])
+    meter = client.post('/hydrometers', json={'reservoir_id': station['reservoir_id'], 'name': 'Entrada sintética', 'kind': 'entrada'}).json()
+    assert client.post(f"/hydrometers/{meter['id']}/outorga-links", json={'outorga_id': permit['id'], 'valid_from_at': '2025-01-01T03:00:00Z'}).status_code == 201
+    reading = client.post(f"/hydrometers/{meter['id']}/readings", json={'volume_m3': 12, 'interval_start_at': '2025-01-02T03:00:00Z', 'observed_at': '2025-01-02T12:00:00Z', 'source': 'manual'}).json()
+    assert client.post(f"/hydrometer-readings/{reading['id']}/review", json={'approved': True, 'note': 'Fixture sintética revisada'}).status_code == 200
+    months = client.get(f"/outorgas/{permit['id']}/usage/annual?year=2025").json()['months']
+    assert Decimal(str(months[0]['measured_volume_m3'])) == Decimal(12)
+    assert months[1]['measured_volume_m3'] is None
+    assert months[0]['coverage'] == 'incompleto'
+    assert client.get(f"/outorgas/{permit['id']}/usage/annual?year=2100").status_code == 422
+    client.post('/auth/logout')
+    assert client.post('/auth/login', json={'email': 'b@example.com', 'password': 'Senha-Segura-123!'}).status_code == 200
+    assert client.get(f"/outorgas/{permit['id']}/usage/annual?year=2025").status_code == 404
+
+
 def test_temporal_outorga_link_switch_keeps_boundary_reading_unassigned_and_isolates_users(client):
     assert client.post("/auth/login", json={"email": "a@example.com", "password": "Senha-Segura-123!"}).status_code == 200
     prop, station = create_test_station(client)
@@ -552,8 +577,8 @@ def test_demo_loader_creates_usable_labeled_account_without_overwriting(client, 
         dashboard = client.get(f"/dashboard/{properties[0]['id']}").json()
         assert dashboard["recent_hydrometers"][0]["readings"][0]["source"] == "simulada"
         comparison = dashboard["monthly_comparisons"][0]
-        assert comparison["is_demo"] is True and comparison["coverage"] == "simulada"
-        assert comparison["missing_days"] == 0 and "independente das leituras salvas" in comparison["notes"]
+        assert comparison["coverage"] == "incompleto"
+        assert comparison["measured_volume_m3"] is None
         assert client.get(f"/alerts/{properties[0]['id']}").json()[0]["origin"] == "demonstração"
         weather = client.get(f"/properties/{properties[0]['id']}/meteorology").json()
         assert weather["is_demo"] is True and weather["station"]["source"] == "simulada"
@@ -635,28 +660,21 @@ def test_totalizer_reset_and_duplicate_integrity(client):
     assert client.post(url, json={"raw_totalizer_m3": 99, "observed_at": "2026-02-28T12:00:00Z"}).status_code == 409
 
 
-def test_pending_image_alert_resolves_after_confirmation(client):
+def test_legacy_image_is_preserved_without_new_image_alerts(client):
     assert client.post("/auth/login", json={"email": "a@example.com", "password": "Senha-Segura-123!"}).status_code == 200
     prop, station = create_test_station(client)
     db_gen = app.dependency_overrides[get_db]()
     db = next(db_gen)
-    review = LevelImageReview(property_id=prop["id"], station_id=station["id"], uploaded_by_id=1,
+    user_id = client.get("/auth/session").json()["user"]["id"]
+    review = LevelImageReview(property_id=prop["id"], station_id=station["id"], uploaded_by_id=user_id,
                               storage_key="fixture-image", original_name="fixture.png", content_type="image/png",
                               size_bytes=1, width_px=1, height_px=1, captured_at=datetime.now(timezone.utc),
                               status="inconclusive", method="fixture", analysis_details={})
-    db.add(review)
-    db.commit()
-    review_id = review.id
+    db.add(review); db.commit(); review_id = review.id; db_gen.close()
     assert client.post(f"/alerts/{prop['id']}/evaluate").status_code == 200
     alerts = client.get(f"/alerts/{prop['id']}").json()
-    alert = next(a for a in alerts if a["details"].get("review_id") == review_id)
-    assert alert["status"] == "open"
-    review.status = "confirmed"
-    db.commit()
-    assert client.post(f"/alerts/{prop['id']}/evaluate").status_code == 200
-    alerts = client.get(f"/alerts/{prop['id']}").json()
-    assert next(a for a in alerts if a["id"] == alert["id"])["status"] == "resolved"
-    db_gen.close()
+    assert not any(a["details"].get("review_id") == review_id for a in alerts)
+    assert client.get(f"/level-image-reviews/{review_id}").status_code == 200
 
 
 def upload_synthetic_ruler(client, station_id, payload=None, filename="fixture-synthetic.png", content_type="image/png"):
@@ -667,62 +685,36 @@ def upload_synthetic_ruler(client, station_id, payload=None, filename="fixture-s
     )
 
 
-def test_ruler_image_review_manual_confirmation_and_correction_history(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(main_module.settings, "media_storage_directory", str(tmp_path))
+def test_assisted_image_reading_is_retired_and_manual_level_remains_available(client):
     assert client.post("/auth/login", json={"email": "a@example.com", "password": "Senha-Segura-123!"}).status_code == 200
     _, station = create_test_station(client)
-    uploaded = upload_synthetic_ruler(client, station["id"], filename="fixture-synthetic.png")
-    assert uploaded.status_code == 201
-    review = uploaded.json()
-    assert review["status"] == "inconclusive"
-    assert review["suggested_level_m"] is None
-    assert client.get(f"/level-stations/{station['id']}/readings").json() == []
-    image_response = client.get(f"/level-image-reviews/{review['id']}/image")
-    assert image_response.status_code == 200 and image_response.content.startswith(b"\x89PNG")
-    assert client.post(f"/level-image-reviews/{review['id']}/confirm", json={"level_m": 0.7}).status_code == 409
-
-    calibrated = client.post(f"/level-image-reviews/{review['id']}/calibrate", json={
-        "reference_1": {"x": 60, "y": 50, "level_m": 1.000},
-        "reference_2": {"x": 60, "y": 150, "level_m": 0.000},
-        "waterline": {"x": 60, "y": 75},
-    })
-    assert calibrated.status_code == 200 and calibrated.json()["status"] == "pending_review"
-    assert calibrated.json()["suggested_level_m"] == "0.750"
-    confirmation = client.post(f"/level-image-reviews/{review['id']}/confirm", json={"level_m": 0.7})
-    assert confirmation.status_code == 200
-    assert confirmation.json()["reading"]["level_m"] == "0.700"
-    assert confirmation.json()["reading"]["source"] == "imagem_revisada"
-    observed_at = datetime.fromisoformat(confirmation.json()["reading"]["observed_at"].replace("Z", "+00:00"))
-    if observed_at.tzinfo is None:  # SQLite stores this synthetic fixture without its offset.
-        observed_at = observed_at.replace(tzinfo=timezone.utc)
-    assert observed_at.astimezone(timezone.utc) == datetime(2026, 11, 19, 13, tzinfo=timezone.utc)
-
-    reopened = client.post(f"/level-image-reviews/{review['id']}/suggestion", json={"level_m": 0.8})
-    assert reopened.status_code == 200 and reopened.json()["status"] == "pending_review"
-    readings = client.get(f"/level-stations/{station['id']}/readings").json()
-    assert readings[0]["quality"].startswith("inconclusiva")
-    corrected = client.post(f"/level-image-reviews/{review['id']}/confirm", json={"level_m": 0.8})
-    assert corrected.status_code == 200 and corrected.json()["reading"]["level_m"] == "0.800"
-    history = client.get(f"/level-image-reviews/{review['id']}/history").json()
-    assert [entry["action"] for entry in history] == ["uploaded", "image_calibrated", "confirmed_or_corrected", "manual_suggestion", "confirmed_or_corrected"]
+    assert upload_synthetic_ruler(client, station["id"]).status_code == 410
+    assert client.post("/level-image-reviews/1/suggestion", json={"level_m": 0.7}).status_code == 410
+    assert client.post("/level-image-reviews/1/confirm", json={"level_m": 0.7}).status_code == 410
+    result = client.post(f"/level-stations/{station['id']}/readings", json={"level_m": 0.7, "observed_at": "2026-11-19T13:00:00Z", "source": "manual"})
+    assert result.status_code == 201
+    assert result.json()["source"] == "manual"
 
 
-def test_ruler_image_upload_validation_and_property_isolation(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(main_module.settings, "media_storage_directory", str(tmp_path))
+def test_meter_coordinates_are_paired_audited_and_isolated(client):
     assert client.post("/auth/login", json={"email": "a@example.com", "password": "Senha-Segura-123!"}).status_code == 200
-    _, station = create_test_station(client)
-    assert upload_synthetic_ruler(client, station["id"], payload=b"not an image").status_code == 422
-    assert client.get(f"/level-stations/{station['id']}/image-reviews").json() == []
-    created = upload_synthetic_ruler(client, station["id"])
+    prop, station = create_test_station(client)
+    values = {"reservoir_id": station["reservoir_id"], "name": "Hidrômetro sintético", "kind": "entrada"}
+    assert client.post("/hydrometers", json={**values, "latitude": -18.123456}).status_code == 422
+    created = client.post("/hydrometers", json={**values, "latitude": -18.123456, "longitude": -47.123456})
     assert created.status_code == 201
-    review_id = created.json()["id"]
-
+    meter = created.json()
+    assert float(meter["latitude"]) == -18.123456
+    assert client.patch(f"/hydrometers/{meter['id']}", json={"name": "Atualizado", "latitude": -19}).status_code == 422
+    updated = client.patch(f"/hydrometers/{meter['id']}", json={"name": "Atualizado", "latitude": -19.0, "longitude": -48.0})
+    assert updated.status_code == 200 and float(updated.json()["longitude"]) == -48.0
+    history = client.get(f"/hydrometers/{meter['id']}/history").json()
+    assert any(entry["new_values"].get("latitude") is not None for entry in history)
+    assert client.get(f"/properties/{prop['id']}/map-geometry").status_code == 200
     client.post("/auth/logout")
     assert client.post("/auth/login", json={"email": "b@example.com", "password": "Senha-Segura-123!"}).status_code == 200
-    assert client.get(f"/level-image-reviews/{review_id}").status_code == 404
-    assert client.get(f"/level-image-reviews/{review_id}/image").status_code == 404
-    assert client.get(f"/level-image-reviews/{review_id}/history").status_code == 404
-    assert client.get(f"/level-stations/{station['id']}/image-reviews").status_code == 404
+    assert client.get(f"/properties/{prop['id']}/map-geometry").status_code == 404
+    assert client.patch(f"/hydrometers/{meter['id']}", json={"name": "Não autorizado", "latitude": 0, "longitude": 0}).status_code == 404
 
 
 def test_alerts_persist_reopen_and_remain_isolated_by_property(client):

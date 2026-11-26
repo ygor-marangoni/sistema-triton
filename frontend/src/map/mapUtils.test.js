@@ -25,6 +25,8 @@ test('restores the current section and reservoir draft only for the same user an
   const storage = { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: (key) => values.delete(key) }
   saveNavigation(storage, 11, 1, 'Hidrômetros', false)
   assert.deepEqual(restoreNavigation(storage, 11, 1), { tab: 'Hidrômetros', reservoirFormOpen: false })
+  saveNavigation(storage, 11, 1, 'Uso hídrico', false)
+  assert.equal(restoreNavigation(storage, 11, 1).tab, 'Uso hídrico')
   saveNavigation(storage, 11, 1, 'Hidrômetros', true)
   assert.deepEqual(restoreNavigation(storage, 11, 1), { tab: 'Hidrômetros', reservoirFormOpen: true })
   assert.equal(restoreNavigation(storage, 12, 1).tab, 'Início')

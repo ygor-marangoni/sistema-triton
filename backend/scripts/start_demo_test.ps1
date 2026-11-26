@@ -4,8 +4,8 @@ param(
     [switch]$UseExistingBuild,
     [switch]$QuickStart,
     [switch]$OpenBrowser,
-    [ValidateRange(1024,65535)][int]$ApiPort = 8014,
-    [ValidateRange(1024,65535)][int]$WebPort = 5176
+    [ValidateRange(1024,65535)][int]$ApiPort = 8018,
+    [ValidateRange(1024,65535)][int]$WebPort = 5180
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,7 +36,9 @@ if ($QuickStart) {
             $probeBody = @{email='demo@example.com';password='Triton-Demo-2026!'} | ConvertTo-Json
             $probe = Invoke-RestMethod "$apiUrl/auth/login" -Method Post -ContentType 'application/json' -Body $probeBody -WebSession $probeSession -TimeoutSec 5
             $probeProperties = Invoke-RestMethod "$apiUrl/properties" -WebSession $probeSession -TimeoutSec 5
-            if (!$existingBundle.Content.Contains($apiUrl) -or $probe.email -ne 'demo@example.com' -or @($probeProperties).Count -lt 1) { throw 'A interface ou a API existentes não correspondem à demonstração.' }
+            $probeSchema = Invoke-RestMethod "$apiUrl/openapi.json" -TimeoutSec 10
+            $routes = @($probeSchema.paths.PSObject.Properties.Name)
+            if (!$existingBundle.Content.Contains($apiUrl) -or $probe.email -ne 'demo@example.com' -or @($probeProperties).Count -lt 1 -or $routes -notcontains '/outorgas/{outorga_id}/usage/annual') { throw 'A interface ou a API existentes não correspondem à versão atual.' }
             Write-Output 'Demonstração já está aberta e respondeu ao login e à consulta de propriedades.'
             if ($OpenBrowser) { Open-DemoBrowser }
             return
@@ -112,7 +114,7 @@ try {
     $canReuseBuild = $false
     if ($UseExistingBuild -and (Test-Path -LiteralPath $index)) {
         $buildTime = (Get-Item -LiteralPath $index).LastWriteTimeUtc
-        $sources = @(Get-ChildItem (Join-Path $frontend 'src') -File -Recurse) + @(Get-Item (Join-Path $frontend 'package.json'), (Join-Path $frontend 'package-lock.json'), (Join-Path $frontend 'vite.config.js'))
+        $sources = @(Get-ChildItem (Join-Path $frontend 'src') -File -Recurse | Where-Object { $_.Name -notmatch '\.(test|spec)\.[^.]+$' }) + @(Get-Item (Join-Path $frontend 'package.json'), (Join-Path $frontend 'package-lock.json'), (Join-Path $frontend 'vite.config.js'))
         $canReuseBuild = @($sources | Where-Object { $_.LastWriteTimeUtc -gt $buildTime }).Count -eq 0
     }
     if ($canReuseBuild) {
